@@ -123,6 +123,10 @@
 }
 
 /* Custom scrollbar — used in search dropdowns and kit lists */
+.custom-scrollbar {
+  scrollbar-gutter: stable both-edges;
+  overscroll-behavior: contain;
+}
 .custom-scrollbar::-webkit-scrollbar { width: 10px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: #F8FAFC; }
 .custom-scrollbar::-webkit-scrollbar-thumb { background: #E2E8F0; border-radius: 20px; border: 3px solid #F8FAFC; }

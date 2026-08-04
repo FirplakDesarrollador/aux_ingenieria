@@ -31,6 +31,7 @@ export default function ModificacionPage() {
     const skuRef = useRef<HTMLDivElement>(null);
     const fetchingRef = useRef(false);
     const offsetRef = useRef(0);
+    const abortControllerRef = useRef<AbortController | null>(null);
 
     // Connection Check
     useEffect(() => {
@@ -47,7 +48,21 @@ export default function ModificacionPage() {
     }, []);
 
     const performSearch = useCallback(async (value: string, isAppending = false) => {
-        const BATCH_SIZE = 100;
+        // Si es una nueva búsqueda, abortamos la petición anterior
+        if (!isAppending) {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+            }
+            abortControllerRef.current = new AbortController();
+        } else {
+            // Si estamos paginando y ya hay una petición de búsqueda o paginación activa, no hacemos nada
+            if (fetchingRef.current || loadingMore) return;
+        }
+
+        const currentController = abortControllerRef.current;
+        fetchingRef.current = true;
+
+        const BATCH_SIZE = 200;
 
         if (!isAppending && value.trim().length > 0) {
             if (selectedSku?.SKU !== value && selectedSku?.DESCRIPCION !== value) setSelectedSku(null);
@@ -62,7 +77,9 @@ export default function ModificacionPage() {
 
         try {
             const url = `/api/sap/skus?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}`;
-            const res = await fetch(url);
+            const res = await fetch(url, {
+                signal: isAppending ? undefined : currentController?.signal
+            });
 
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
@@ -84,20 +101,29 @@ export default function ModificacionPage() {
             });
 
         } catch (err: any) {
+            if (err.name === 'AbortError') {
+                console.log("Fetch aborted for SKU search");
+                return;
+            }
             setDetailedError(err.message);
         } finally {
             fetchingRef.current = false;
-            if (isAppending) setLoadingMore(false);
-            else setLoading(false);
+            // Solo apagar los estados de loading si esta petición es la última activa
+            if (isAppending || abortControllerRef.current === currentController) {
+                if (isAppending) setLoadingMore(false);
+                else setLoading(false);
+            }
         }
-    }, [selectedSku]);
+    }, [selectedSku, loadingMore]);
 
     useEffect(() => {
         if (activeField === "sku") {
-            const timer = setTimeout(() => performSearch(skuInput), 300);
+            // Solo buscar si hay al menos 1 carácter
+            if (skuInput.trim().length === 0) return;
+            const timer = setTimeout(() => performSearch(skuInput), 200);
             return () => clearTimeout(timer);
         }
-    }, [skuInput, activeField]);
+    }, [skuInput, activeField, performSearch]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -112,18 +138,27 @@ export default function ModificacionPage() {
 
     const handleFocus = () => {
         setActiveField("sku");
-        performSearch(skuInput);
+        // Solo buscamos si ya hay texto (evita cargar el catálogo completo al hacer click)
+        if (skuInput.trim().length > 0) {
+            performSearch(skuInput);
+        }
     };
 
     const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
         const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
         if (scrollHeight - scrollTop <= clientHeight + 100 && !fetchingRef.current && hasMore) {
-            fetchingRef.current = true;
             performSearch(skuInput, true);
         }
     };
 
     const handleSelect = (item: any) => {
+        if (item.STATUS === 'INACTIVO') {
+            setDetailedError('Este SKU está inactivo y no puede seleccionarse.');
+            setTimeout(() => setDetailedError(null), 5000);
+            return;
+        }
+
+        setDetailedError(null);
         setSkuInput(item.SKU);
         setSelectedSku(item);
         setSkuResults([]);
@@ -131,6 +166,10 @@ export default function ModificacionPage() {
     };
 
     const handleSubmit = async () => {
+        if (detailedError) {
+            alert(`No puedes finalizar la solicitud mientras exista esta restricción: ${detailedError}`);
+            return;
+        }
         if (!selectedSku || !nuevaDescripcion.trim() || !comentarios.trim()) {
             alert("Por favor, seleccione un artículo, ingrese la nueva descripción y añada comentarios para finalizar la solicitud.");
             return;
@@ -217,6 +256,18 @@ export default function ModificacionPage() {
 
             {/* Form Card */}
             <div className="w-full max-w-4xl bg-white rounded-[2rem] p-16 shadow-[0_40px_80px_rgba(0,0,0,0.06)] border border-slate-100 space-y-12 relative animate-in zoom-in duration-700 overflow-visible">
+                {detailedError && (
+                    <div className="flex items-start gap-4 p-5 bg-red-50 border-2 border-red-300 rounded-2xl shadow-md" role="alert">
+                        <XCircle className="w-7 h-7 text-red-500 shrink-0" />
+                        <div className="flex-1">
+                            <p className="text-red-700 font-black text-sm uppercase tracking-wide">Restricción activa</p>
+                            <p className="text-red-600 font-medium text-sm mt-1">{detailedError}</p>
+                        </div>
+                        <button type="button" onClick={() => setDetailedError(null)} className="p-2 text-red-400 hover:text-red-600 hover:bg-red-100 rounded-xl" aria-label="Cerrar mensaje">
+                            <XCircle className="w-5 h-5" />
+                        </button>
+                    </div>
+                )}
 
                 <div className="space-y-10 animate-in slide-in-from-bottom-8 duration-500">
 
@@ -237,10 +288,15 @@ export default function ModificacionPage() {
 
                         {selectedSku && !activeField && (
                             <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-500">
-                                <div className="w-full h-20 border-2 border-[#3499CD] rounded-2xl flex items-center justify-center bg-white">
+                                <div className="w-full h-20 border-2 border-[#3499CD] rounded-2xl flex items-center justify-between gap-4 bg-white px-6">
                                     <span className="text-[#3499CD] font-black text-2xl tracking-tighter uppercase">
                                         SKU: {selectedSku.SKU}
                                     </span>
+                                    {selectedSku.STATUS && (
+                                        <span className={`rounded-full px-3 py-1 text-[0.7rem] font-black uppercase ${selectedSku.STATUS === 'ACTIVO' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                            {selectedSku.STATUS}
+                                        </span>
+                                    )}
                                 </div>
                                 <div className="space-y-1 pl-4">
                                     <div className="text-[#64748B] text-[0.8rem] font-bold uppercase tracking-wider">Descripción Actual</div>
@@ -268,12 +324,19 @@ export default function ModificacionPage() {
                                         <>
                                             {skuResults.map((item, idx) => (
                                                 <div
-                                                    key={idx}
-                                                    onMouseDown={() => handleSelect(item)}
+                                                    key={item.SKU || idx}
+                                                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleSelect(item); }}
                                                     className="flex w-full group cursor-pointer hover:bg-[#FFFBEB] border-b border-slate-100 last:border-0 transition-colors duration-200"
                                                 >
                                                     <div className="w-[25%] px-8 py-5 font-mono font-black text-[#0F172A] text-lg tracking-tighter border-r border-slate-100 group-hover:text-[#3499CD] transition-colors">
-                                                        {item.SKU || "S/C"}
+                                                        <div className="flex items-center gap-2">
+                                                            {item.SKU || "S/C"}
+                                                            {item.STATUS && (
+                                                                <span className={`rounded-full px-2 py-1 text-[0.65rem] font-black uppercase ${item.STATUS === 'ACTIVO' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                                    {item.STATUS}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                     <div className="w-[75%] px-8 py-5 font-black text-[#64748B] text-[0.95rem] uppercase group-hover:text-[#0F172A] transition-colors leading-relaxed">
                                                         {item.DESCRIPCION || "SIN NOMBRE"}
@@ -327,11 +390,13 @@ export default function ModificacionPage() {
                 <div className="pt-8 flex flex-col gap-4 relative z-0">
                     <button
                         onClick={handleSubmit}
-                        disabled={isSubmitting || submitSuccess}
-                        className={`w-full h-16 text-white font-black text-xl tracking-[0.2em] rounded-2xl shadow-xl transition-all uppercase flex items-center justify-center gap-3
+                        disabled={isSubmitting || submitSuccess || Boolean(detailedError)}
+                        className={`w-full h-16 text-white font-black text-xl tracking-[0.2em] rounded-2xl shadow-xl transition-all uppercase flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#0F364B] disabled:active:scale-100
                             ${submitSuccess ? 'bg-green-500 scale-[1.02]' : 'bg-[#0F364B] hover:bg-[#0A2432] active:scale-[0.98]'}`}
                     >
-                        {isSubmitting ? (
+                        {detailedError ? (
+                            <span>CORRIJA LA RESTRICCIÓN</span>
+                        ) : isSubmitting ? (
                             <Loader2 className="w-8 h-8 animate-spin" />
                         ) : submitSuccess ? (
                             <>

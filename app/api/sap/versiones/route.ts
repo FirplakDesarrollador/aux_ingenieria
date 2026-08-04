@@ -1,42 +1,37 @@
 import { NextResponse } from "next/server";
-import { loginSAP } from "@/lib/sap";
+import { fetchSAP } from "@/lib/sap";
 
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") || "";
     const offset = parseInt(searchParams.get("offset") || "0");
-    const limit = parseInt(searchParams.get("limit") || "50");
+    const limit = parseInt(searchParams.get("limit") || "200");
 
     try {
-        const { sessionId } = await loginSAP();
-        const baseUrl = process.env.SAP_API_URL?.replace("/Login", "") || "";
-
         let filterQuery = "";
-        if (search) {
-            const words = search.trim().split(/\s+/).filter(w => w.length > 0);
-            if (words.length > 0) {
-                const nameFilters = words.map(word => `contains(Name, '${word}')`).join(' and ');
-                filterQuery = `&$filter=(${nameFilters}) or contains(Code, '${search}')`;
+        if (search.trim()) {
+            const upperSearch = search.trim().toUpperCase();
+            const words = upperSearch.split(/\s+/).filter(w => w.length > 0);
+
+            if (words.length === 1) {
+                filterQuery = `&$filter=contains(Code,'${words[0]}') or contains(Name,'${words[0]}')`;
+            } else {
+                const nameFilters = words.map(w => `contains(Name,'${w}')`).join(' and ');
+                filterQuery = `&$filter=(${nameFilters}) or contains(Code,'${words[0]}')`;
             }
         }
 
-        const url = `${baseUrl}/U_FIR_VERSION?$skip=${offset}&$top=${limit}${filterQuery}`;
-
-        const res = await fetch(url, {
-            method: "GET",
-            headers: {
-                "Cookie": `B1SESSION=${sessionId}; ROUTEID=.node0`,
-            }
-        });
+        const endpointPath = `/U_FIR_VERSION?$skip=${offset}&$top=${limit}&$orderby=Code asc${filterQuery}`;
+        const res = await fetchSAP(endpointPath);
 
         if (!res.ok) {
-            throw new Error(`Error fetching Versions: ${res.statusText}`);
+            const errText = await res.text().catch(() => res.statusText);
+            throw new Error(`SAP error ${res.status}: ${errText}`);
         }
 
         const data = await res.json();
 
-        // Transformar para que coincida con lo que esperaba la UI (CodigoVersion y Version)
-        const formattedData = data.value.map((item: any) => ({
+        const formattedData = (data.value || []).map((item: any) => ({
             CodigoVersion: item.Code,
             Version: item.Name
         }));
@@ -45,6 +40,7 @@ export async function GET(request: Request) {
 
         return NextResponse.json({ data: formattedData, hasMore });
     } catch (error: any) {
+        console.error("[API/versiones]", error.message);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }

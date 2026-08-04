@@ -3,9 +3,213 @@
 import { ChevronLeft, PlusCircle, Package, Copy, Search, Loader2, ChevronRight, Bug, Database, XCircle, Trash2, CheckCircle2, AlertTriangle } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { getCompleteKitRestriction, suggestKitName, validateKitCandidate } from "@/lib/kit-mix-match";
 
 type ActiveField = "sku" | "color" | "version" | "kit_sku" | null;
 
+// El blanco 0100 es el único acabado compartido entre muebles y productos
+// de mármol/fibra de vidrio.
+const SHARED_COLOR_CODES = new Set(["0100"]);
+
+// Acabados exclusivos de mármol y fibra de vidrio. Ninguno de estos puede
+// utilizarse en muebles; el resto del catálogo se considera color de mueble.
+const MATERIAL_ONLY_COLOR_CODES = new Set([
+    "0056", "0101", "0102", "0103", "0106", "0107", "0111",
+    "0115", "0116", "0118", "0125", "0129", "0141", "0147",
+    "0149", "0150", "0155", "0160", "0300", "0347", "0348",
+    "0360", "0371", "0380", "0381", "0382", "0383", "0437",
+    "0500", "0501", "0502", "0503", "0504", "0508", "0510", "0512",
+    "0541", "0561", "0590", "0647", "0685", "0721", "0727",
+    "0763", "0773", "0775", "0900", "0901", "0902", "0904",
+    "0943", "0947", "0950", "0960", "0961",
+]);
+
+const MATERIAL_ALLOWED_COLOR_CODES = new Set([
+    ...MATERIAL_ONLY_COLOR_CODES,
+    ...SHARED_COLOR_CODES,
+]);
+// Respaldo para nombres futuros que todavía no tengan un código catalogado.
+const MATERIAL_COLOR_TERMS = [
+    "BLANCO FORT",
+    "GRIS NIEBLA",
+    "GRANITO",
+    "MARMOL SINTETICO",
+    "PORCELANA FRIA",
+    "ARENA F.V",
+    "AZUL CIELO FV",
+    "VERDE PRIMAVERA FV",
+    "CARIBE SHELL",
+];
+const normalizeCatalogText = (value: unknown) =>
+    String(value ?? "")
+        .toUpperCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim();
+
+const MATERIAL_PRODUCT_TERMS = [
+    "MARMOL",
+    "FIBRA DE VIDRIO",
+    "PORCELANA FRIA",
+    "GELCOAT",
+    "LAVAMANOS",
+    "LAVABO",
+    "LAVARROPAS",
+    "LAVADERO",
+    "LAVAPLATOS",
+    "MESON",
+    "HIDROMASAJE",
+    "BANERA",
+    "TINA",
+    "VANITY",
+    "SMC",
+];
+
+const MATERIAL_PRODUCT_SKU_PREFIXES = [
+    "VBAN01", "VBAN02", "VBAN03", "VBAN04", "VBAN07", "VBAN08",
+    "VBAN13", "VBAN14", "VBAN17", "VBAN18", "VBAN20", "VBAN21",
+    "VBAN25", "VBAN26", "VBAN28", "VBAN29", "VBAN33",
+    "VCOC04", "VCOC05", "VCOC07",
+    "VHEM", "VHPT", "VTIN",
+    "VROP01", "VROP02", "VROP04", "VROP05", "VROP06", "VROP09",
+    "VROP13",
+    "CSMC01", "VSMC01", "VQUA",
+];
+// Familias comerciales cuyo producto principal es un mueble. Las familias de
+// kits con lavamanos conservan prioridad como producto de material.
+const FURNITURE_PRODUCT_SKU_PREFIXES = [
+    "VBAN05", "VBAN06", "VBAN12", "VBAN15", "VBAN16", "VBAN22",
+    "VBAN23", "VBAN24", "VBAN27", "VBAN30", "VBAN31", "VBAN32",
+    "VCOC01", "VCOC02", "VCOC03", "VCOC08", "VCOC09",
+    "VCLO01",
+    "VROP03", "VROP07", "VROP10", "VROP11", "VROP12", "VOUT03",
+];
+const FURNITURE_PRODUCT_TERMS = [
+    "MUEBLE",
+    "MBLE",
+    "ALACENA",
+    "GABINETE",
+    "ESPEJO",
+    "CARB ",
+    "HRJ ",
+];
+
+const matchesProductPrefix = (sku: string, prefixes: string[]) => {
+    const comparableSku = sku.startsWith("C") ? `V${sku.slice(1)}` : sku;
+    return prefixes.some(prefix => comparableSku.startsWith(prefix));
+};
+const isMaterialProduct = (item: any) => {
+    const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
+    const description = normalizeCatalogText(item?.DESCRIPCION ?? item?.ItemName);
+
+    // La familia SAP es la fuente principal. Esto permite reconocer correctamente
+    // kits que incluyen la palabra "mueble" pero cuyo color corresponde a la superficie.
+    if (matchesProductPrefix(sku, MATERIAL_PRODUCT_SKU_PREFIXES)) return true;
+
+    if (!sku.startsWith("V")) return false;
+    if (FURNITURE_PRODUCT_TERMS.some(term => description.includes(term))) return false;
+
+    return MATERIAL_PRODUCT_TERMS.some(term => description.includes(term));
+};
+
+const isFurnitureProduct = (item: any) => {
+    if (!item || isMaterialProduct(item)) return false;
+
+    const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
+    const description = normalizeCatalogText(item?.DESCRIPCION ?? item?.ItemName);
+
+    if (matchesProductPrefix(sku, FURNITURE_PRODUCT_SKU_PREFIXES)) return true;
+    if (!sku.startsWith("V")) return false;
+    return FURNITURE_PRODUCT_TERMS.some(term => description.includes(term));
+};
+const getNormalizedColor = (item: any) => {
+    const code = normalizeCatalogText(item?.CodigoColor ?? item?.Code);
+    const text = normalizeCatalogText(`${code} ${item?.Color ?? item?.Name ?? ""}`);
+    return { code, text };
+};
+
+const isAllowedMaterialColor = (item: any) => {
+    const { code, text } = getNormalizedColor(item);
+    return MATERIAL_ALLOWED_COLOR_CODES.has(code) || MATERIAL_COLOR_TERMS.some(term => text.includes(term));
+};
+
+const isFurnitureForbiddenColor = (item: any) => {
+    const { code, text } = getNormalizedColor(item);
+    if (SHARED_COLOR_CODES.has(code)) return false;
+    return MATERIAL_ONLY_COLOR_CODES.has(code) || MATERIAL_COLOR_TERMS.some(term => text.includes(term));
+};
+
+const getFurnitureColorRestriction = (sku: any, color: any) => {
+    if (!sku || !color) return null;
+    if (!isFurnitureProduct(sku) || !isFurnitureForbiddenColor(color)) return null;
+
+    const skuCode = sku?.SKU ?? sku?.ItemCode ?? "mueble seleccionado";
+    const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    return `El mueble ${skuCode} no puede crearse con el color "${colorName}" porque es un acabado exclusivo de mármol o fibra de vidrio. Selecciona un color disponible para muebles.`;
+};
+
+const getMaterialProductColorRestriction = (sku: any, color: any) => {
+    if (!sku || !color) return null;
+    if (!isMaterialProduct(sku) || isAllowedMaterialColor(color)) return null;
+
+    const skuCode = sku?.SKU ?? sku?.ItemCode ?? "seleccionado";
+    const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    return `El producto ${skuCode} no puede crearse con el color de mueble "${colorName}". Para productos de mármol o fibra de vidrio, selecciona un acabado compatible con su material.`;
+};
+const MATERIAL_ONLY_VERSION_TERMS = ["PERF", "PERFORACION"];
+
+const getFurnitureVersionRestriction = (sku: any, version: any) => {
+    if (!sku || !version || !isFurnitureProduct(sku)) return null;
+
+    const versionCode = version?.CodigoVersion ?? version?.Code ?? "seleccionada";
+    const versionName = version?.Version ?? version?.Name ?? versionCode;
+    const normalizedVersion = normalizeCatalogText(`${versionCode} ${versionName}`);
+    if (!MATERIAL_ONLY_VERSION_TERMS.some(term => normalizedVersion.includes(term))) return null;
+
+    const skuCode = sku?.SKU ?? sku?.ItemCode ?? "mueble seleccionado";
+    return `El mueble ${skuCode} no puede usar la versión "${versionName}" porque las versiones de perforación son exclusivas de mesones. Selecciona una versión compatible con muebles.`;
+};
+
+const getProductConfigurationRestriction = (sku: any, color: any, version?: any) =>
+    getFurnitureColorRestriction(sku, color) ||
+    getMaterialProductColorRestriction(sku, color) ||
+    getFurnitureVersionRestriction(sku, version);
+const buildConfiguredSku = (sku: any, color: any, version?: any) => {
+    const skuCode = normalizeCatalogText(sku?.SKU ?? sku?.ItemCode);
+    const colorCode = normalizeCatalogText(color?.CodigoColor ?? color?.Code);
+    const versionCode = normalizeCatalogText(version?.CodigoVersion ?? version?.Code);
+    if (!skuCode || !colorCode) return null;
+
+    const segments = skuCode.split("-");
+    if (segments.length >= 4) {
+        const colorIndex = segments.length - 1;
+        const versionIndex = segments.length - 2;
+        if (versionCode) segments[versionIndex] = versionCode;
+        segments[colorIndex] = colorCode;
+        return segments.join("-");
+    }
+
+    return `${skuCode}-${colorCode}`;
+};
+
+const findExistingConfiguredSku = async (sku: any, color: any, version?: any) => {
+    const targetSku = buildConfiguredSku(sku, color, version);
+    if (!targetSku) return null;
+
+    const response = await fetch(`/api/sap/skus?exact=${encodeURIComponent(targetSku)}&limit=1`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "No fue posible validar el SKU en SAP.");
+
+    const exists = (payload.data || []).some((item: any) => normalizeCatalogText(item?.SKU) === targetSku);
+    return exists ? targetSku : null;
+};
+
+const getExistingSkuMessage = (sku: string) => {
+    const segments = sku.split("-");
+    const versionCode = segments.at(-2) || "seleccionada";
+    const colorCode = segments.at(-1) || "seleccionado";
+    return `Este ítem ya existe con el color seleccionado. El artículo ${sku} ya está creado en SAP con el color ${colorCode} y la versión ${versionCode}. Selecciona otra combinación.`;
+};
 export default function CreacionPage() {
     const supabase = createClient();
     const [selectedAction, setSelectedAction] = useState<string | null>(null);
@@ -36,11 +240,13 @@ export default function CreacionPage() {
     const [kitInput, setKitInput] = useState("");
     const [kitResults, setKitResults] = useState<any[]>([]);
     const [kitName, setKitName] = useState("");
+    const [kitAdditional, setKitAdditional] = useState("");
     const [kitSelectedItems, setKitSelectedItems] = useState<any[]>([]);
 
     // Form Inputs (Global for all sub-modules)
     const [comentarios, setComentarios] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isCheckingDuplicate, setIsCheckingDuplicate] = useState(false);
     const [submitSuccess, setSubmitSuccess] = useState(false);
 
     // Kit compatibility error toast
@@ -63,23 +269,53 @@ export default function CreacionPage() {
     // Sync Refs for scroll lock and offset tracking (avoids stale closures entirely)
     const fetchingRef = useRef<Record<string, boolean>>({ sku: false, color: false, version: false, kit_sku: false });
     const offsetRef = useRef<Record<string, number>>({ sku: 0, color: 0, version: 0, kit_sku: 0 });
+    const abortControllersRef = useRef<Record<string, AbortController | null>>({ sku: null, color: null, version: null, kit_sku: null });
+
+    // Cache cliente: almacena resultados recientes para mostrarlos instantáneamente
+    // Clave: "field:query" -> { data, hasMore, ts }
+    const searchCacheRef = useRef<Map<string, { data: any[], hasMore: boolean, ts: number }>>(new Map());
+    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
 
     // Connection Check & Table Detection
     useEffect(() => {
+        const controller = new AbortController();
+        let cancelled = false;
+        const timeoutId = window.setTimeout(() => controller.abort(), 18000);
+
         const checkConnection = async () => {
             try {
-                const res = await fetch("/api/sap/skus?limit=1");
+                const res = await fetch("/api/sap/skus?limit=1", { signal: controller.signal });
                 if (!res.ok) throw new Error("SAP Connection failed");
-                setConnStatus("connected");
-            } catch (err: any) {
-                setConnStatus("error");
+                if (!cancelled) setConnStatus("connected");
+            } catch {
+                if (!cancelled) setConnStatus("error");
+            } finally {
+                window.clearTimeout(timeoutId);
             }
         };
+
         checkConnection();
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timeoutId);
+            controller.abort();
+        };
     }, []);
 
     const performSearch = useCallback(async (field: ActiveField, value: string, isAppending = false) => {
-        if (!field || fetchingRef.current[field]) return;
+        if (!field) return;
+
+        // Si es una nueva búsqueda, abortamos la petición anterior de ese campo
+        if (!isAppending) {
+            if (abortControllersRef.current[field]) {
+                abortControllersRef.current[field].abort();
+            }
+            abortControllersRef.current[field] = new AbortController();
+        } else {
+            if (fetchingRef.current[field]) return;
+        }
+
+        const currentController = abortControllersRef.current[field];
         fetchingRef.current[field] = true;
 
         if (!isAppending && value.trim().length > 0) {
@@ -88,15 +324,32 @@ export default function CreacionPage() {
             else if (field === "version" && (selectedVersion?.Version !== value && selectedVersion?.CodigoVersion !== value)) setSelectedVersion(null);
         }
 
-        const BATCH_SIZE = 100;
-
-        // Reset offset on new search, keep it for appending
-        if (!isAppending) {
-            offsetRef.current[field] = 0;
-        }
-
-        // Synchronously grab the current offset from ref — no stale closure possible
+        const BATCH_SIZE = 200;
+        if (!isAppending) offsetRef.current[field] = 0;
         const offset = offsetRef.current[field];
+
+        // ─── CACHE CLIENTE: mostrar resultados instantáneos si ya fueron buscados ───
+        const catalogType = field === "sku" && selectedAction === "de_cero" ? "item-groups" : field;
+        const cacheKey = `${catalogType}:${value.trim().toUpperCase()}:${offset}`;
+        if (!isAppending) {
+            const cached = searchCacheRef.current.get(cacheKey);
+            if (cached && (Date.now() - cached.ts < CACHE_TTL_MS)) {
+                // Mostrar resultados del caché instantáneamente
+                const displayCol = (field === "sku" || field === "kit_sku") ? "SKU" : field === "color" ? "CodigoColor" : "CodigoVersion";
+                const updateList = (prev: any[]) => {
+                    return Array.from(new Map(cached.data.map((item: any) => [item[displayCol] ?? Math.random(), item])).values());
+                };
+                if (field === "sku") setSkuResults(updateList);
+                else if (field === "color") setColorResults(updateList);
+                else if (field === "version") setVersionResults(updateList);
+                else if (field === "kit_sku") setKitResults(updateList);
+                setHasMore(prev => ({ ...prev, [field]: cached.hasMore }));
+                offsetRef.current[field] = cached.data.length;
+                fetchingRef.current[field] = false;
+                return; // No hacer fetch si el caché es reciente
+            }
+        }
+        // ─────────────────────────────────────────────
 
         if (isAppending) setLoadingMore(prev => ({ ...prev, [field]: true }));
         else setLoading(prev => ({ ...prev, [field]: true }));
@@ -105,7 +358,10 @@ export default function CreacionPage() {
             let endpoint = "";
             let displayCodeCol = "";
 
-            if (field === "sku" || field === "kit_sku") {
+            if (field === "sku" && selectedAction === "de_cero") {
+                endpoint = "/api/sap/item-groups";
+                displayCodeCol = "SKU";
+            } else if (field === "sku" || field === "kit_sku") {
                 endpoint = "/api/sap/skus";
                 displayCodeCol = "SKU";
             } else if (field === "color") {
@@ -116,8 +372,11 @@ export default function CreacionPage() {
                 displayCodeCol = "CodigoVersion";
             }
 
-            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}`;
-            const res = await fetch(url);
+            const kitFilters = field === "kit_sku" ? "&salesOnly=true&vOnly=true&kitComponents=true" : "";
+            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${kitFilters}`;
+            const res = await fetch(url, {
+                signal: currentController?.signal
+            });
 
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
@@ -127,9 +386,7 @@ export default function CreacionPage() {
             const resData = await res.json();
             const newData: any[] = resData.data || [];
 
-            // Advance the offset ref by how many items we got
             offsetRef.current[field] += newData.length;
-
             setHasMore(prev => ({ ...prev, [field]: resData.hasMore }));
 
             const displayCol = displayCodeCol;
@@ -144,28 +401,47 @@ export default function CreacionPage() {
             else if (field === "version") setVersionResults(updateList);
             else if (field === "kit_sku") setKitResults(updateList);
 
+            // Guardar en caché (solo búsquedas nuevas, no paginación)
+            if (!isAppending) {
+                // Limpiar entradas viejas si el caché es grande
+                if (searchCacheRef.current.size > 50) {
+                    const oldestKey = searchCacheRef.current.keys().next().value;
+                    if (oldestKey) searchCacheRef.current.delete(oldestKey);
+                }
+                searchCacheRef.current.set(cacheKey, { data: newData, hasMore: resData.hasMore, ts: Date.now() });
+            }
+
         } catch (err: any) {
+            if (err.name === 'AbortError') {
+                console.log(`Fetch aborted for field: ${field}`);
+                return;
+            }
             console.error("Search Error:", err);
             setDetailedError(err.message);
         } finally {
             fetchingRef.current[field] = false;
-            if (isAppending) setLoadingMore(prev => ({ ...prev, [field]: false }));
-            else setLoading(prev => ({ ...prev, [field]: false }));
+            if (isAppending || abortControllersRef.current[field] === currentController) {
+                if (isAppending) setLoadingMore(prev => ({ ...prev, [field]: false }));
+                else setLoading(prev => ({ ...prev, [field]: false }));
+            }
         }
-    }, [selectedSku, selectedColor, selectedVersion]);
+    }, [selectedSku, selectedColor, selectedVersion, selectedAction]);
 
-    // Consolidated typing effect with concurrency protection
+    // Consolidated typing effect with concurrency protection (debounce)
     useEffect(() => {
-        if (activeField && !fetchingRef.current[activeField]) {
+        if (activeField) {
             const val = activeField === "sku" ? skuInput : 
                         activeField === "color" ? colorInput : 
                         activeField === "kit_sku" ? kitInput : versionInput;
+            // En el selector de grupos, limpiar el texto vuelve a cargar la lista completa.
+            const isGroupSelector = activeField === "sku" && selectedAction === "de_cero";
+            if (!isGroupSelector && val.trim().length === 0) return;
             const timer = setTimeout(() => {
                 performSearch(activeField, val);
-            }, 300);
+            }, 150);
             return () => clearTimeout(timer);
         }
-    }, [skuInput, colorInput, kitInput, versionInput, activeField, performSearch]);
+    }, [skuInput, colorInput, kitInput, versionInput, activeField, selectedAction, performSearch]);
 
     const handleFocus = (field: ActiveField) => {
         if (field !== "sku") setSkuResults([]);
@@ -174,19 +450,36 @@ export default function CreacionPage() {
         if (field !== "kit_sku") setKitResults([]);
 
         setActiveField(field);
+        const isGroupSelector = field === "sku" && selectedAction === "de_cero";
         const val = field === "sku" ? skuInput : field === "color" ? colorInput : field === "kit_sku" ? kitInput : versionInput;
-        performSearch(field, val);
+        if (isGroupSelector || val.trim().length > 0) {
+            performSearch(field, isGroupSelector ? "" : val);
+        }
     };
 
     const handleScroll = (e: React.UIEvent<HTMLDivElement>, field: ActiveField) => {
         const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
         const fieldKey = field as string;
         if (scrollHeight - scrollTop <= clientHeight + 100 && !fetchingRef.current[fieldKey] && hasMore[fieldKey]) {
-            fetchingRef.current[fieldKey] = true;
             const val = field === "sku" ? skuInput : field === "color" ? colorInput : field === "kit_sku" ? kitInput : versionInput;
             performSearch(field, val, true);
         }
     };
+
+    // Revalida las restricciones aunque la selección ya existiera o se haya
+    // realizado en un orden diferente (SKU antes/después del color).
+    useEffect(() => {
+        if (selectedAction !== "estructura") return;
+        if (!selectedSku || !selectedColor) return;
+
+        const restriction = getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion);
+
+        if (restriction) setDetailedError(restriction);
+    }, [selectedAction, selectedSku, selectedColor, selectedVersion]);
+    useEffect(() => {
+        setDetailedError(null);
+        setKitCompatError(null);
+    }, [selectedAction]);
 
     // Close on click outside
     useEffect(() => {
@@ -203,23 +496,79 @@ export default function CreacionPage() {
     const handleSubmit = async () => {
         if (!selectedAction) return;
 
+        const blockingError = detailedError || kitCompatError;
+        if (blockingError) {
+            alert(`No puedes finalizar la solicitud mientras exista esta restricción: ${blockingError}`);
+            return;
+        }
+
+        if (selectedAction === "estructura" && !selectedSku) {
+            const error = "Selecciona el SKU de referencia desde la lista desplegable antes de finalizar.";
+            setDetailedError(error);
+            alert(error);
+            return;
+        }
+
+        const configurationRestriction = selectedAction === "estructura"
+            ? getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion)
+            : null;
+        if (configurationRestriction) {
+            setDetailedError(configurationRestriction);
+            alert(configurationRestriction);
+            return;
+        }
+
+        if (selectedAction === "estructura" && selectedSku && selectedColor) {
+            setIsCheckingDuplicate(true);
+            try {
+                const existingSku = await findExistingConfiguredSku(selectedSku, selectedColor, selectedVersion);
+                if (existingSku) {
+                    const error = getExistingSkuMessage(existingSku);
+                    setDetailedError(error);
+                    alert(error);
+                    return;
+                }
+            } catch (error: any) {
+                const message = `No fue posible comprobar si la combinación ya existe: ${error.message}`;
+                setDetailedError(message);
+                alert(message);
+                return;
+            } finally {
+                setIsCheckingDuplicate(false);
+            }
+        }
         // Validaciones por tipo de módulo (solo aplican a Crear de Cero y Kit)
         if (selectedAction === "de_cero") {
-            if (!selectedColor || !selectedVersion || !comentarios.trim()) {
-                alert("Por favor, seleccione Color, Versión y añada Comentarios para finalizar la solicitud desde cero.");
+            if (!selectedSku || !selectedColor || !selectedVersion || !comentarios.trim()) {
+                alert("Por favor, seleccione Grupo de artículos, Color, Versión y añada Comentarios para finalizar la solicitud desde cero.");
                 return;
             }
         }
 
+        if (selectedAction === "kit") {
+            const compositionError = getCompleteKitRestriction(kitSelectedItems);
+            const error = !kitName.trim()
+                ? "Debes escribir el nombre del kit antes de finalizar."
+                : compositionError;
+            if (error) {
+                setKitCompatError(error);
+                alert(error);
+                return;
+            }
+        }
         setIsSubmitting(true);
         try {
             const rowData = {
                 tipo: selectedAction,
-                sku_referencia: selectedAction === "estructura" ? selectedSku?.SKU : null,
+                sku_referencia: selectedAction === "estructura"
+                    ? selectedSku?.SKU
+                    : selectedAction === "de_cero"
+                        ? selectedSku?.GROUP_NAME || selectedSku?.DESCRIPCION
+                        : null,
                 color_codigo: selectedColor?.CodigoColor || null,
                 version_codigo: selectedVersion?.CodigoVersion || selectedVersion?.Version || null,
                 kit_articulos: selectedAction === "kit" ? kitSelectedItems : null,
-                kit_nombre: selectedAction === "kit" ? kitName : null,
+                kit_nombre: selectedAction === "kit" ? [kitName.trim(), kitAdditional.trim()].filter(Boolean).join(" - ") : null,
                 comentarios: comentarios,
             };
 
@@ -233,7 +582,7 @@ export default function CreacionPage() {
                 setSkuInput(""); setSelectedSku(null);
                 setColorInput(""); setSelectedColor(null);
                 setVersionInput(""); setSelectedVersion(null);
-                setKitInput(""); setKitSelectedItems([]); setKitName("");
+                setKitInput(""); setKitSelectedItems([]); setKitName(""); setKitAdditional("");
                 setComentarios("");
             }, 2000);
         } catch (err: any) {
@@ -244,83 +593,43 @@ export default function CreacionPage() {
         }
     };
 
-        const validateKitCompatibility = (newItem: any, currentItems: any[]) => {
-            const getDetails = (item: any) => {
-                const raw = (item.DESCRIPCION || item.ItemName || "").toUpperCase()
-                    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                const sku = (item.SKU || item.ItemCode || "").toUpperCase();
-
-                console.log("[KIT VALIDATE]", sku, "→", raw);
-
-                const isMueble = raw.includes("MUE") || raw.includes("GABINETE") || raw.includes("VANITY") || sku.startsWith("MUE");
-                const isLavamanos = raw.includes("LAVA") || raw.includes("LAVAB") || raw.includes("BASIN") || raw.includes("SINK") || sku.startsWith("LAV");
-                const isEspejo = raw.includes("ESPEJO") || raw.includes("MIRROR") || sku.startsWith("ESP");
-                const isVessel = raw.includes("VESSEL") || raw.includes("SOBREPONER");
-
-                const dimMatch = raw.match(/(\d{2,3})\s*[Xx*]\s*(\d{2,3})/);
-                const dimension = dimMatch ? `${dimMatch[1]}X${dimMatch[2]}` : null;
-
-                // Extraer prefijo de familia del SKU (ej: CACC01, MAQYEQ, etc.)
-                const familyPrefix = sku.split(/\d/)[0] || sku.substring(0, 6);
-
-                return { isMueble, isLavamanos, isEspejo, dimension, isVessel, raw, sku, familyPrefix };
-            };
-
-            if (currentItems.length === 0) return null;
-
-            const newDetails = getDetails(newItem);
-            console.log("[KIT VALIDATE] Detectado:", { isMueble: newDetails.isMueble, isLavamanos: newDetails.isLavamanos, dimension: newDetails.dimension, familia: newDetails.familyPrefix });
-
-            for (const item of currentItems) {
-                const currDetails = getDetails(item);
-
-                // Regla 1: Mueble + Lavamanos → misma medida obligatoria
-                const isMuebleLavaPair =
-                    (newDetails.isMueble && currDetails.isLavamanos) ||
-                    (newDetails.isLavamanos && currDetails.isMueble);
-
-                if (isMuebleLavaPair && newDetails.dimension && currDetails.dimension && newDetails.dimension !== currDetails.dimension) {
-                    return `Las medidas no coinciden según el catálogo Firplak.\n\nArtículo nuevo: ${newDetails.sku} (${newDetails.dimension})\nArtículo en kit: ${currDetails.sku} (${currDetails.dimension})\n\nEl mueble y el lavamanos deben tener el mismo ancho × fondo.`;
-                }
-
-                // Regla 2: Vessel requiere mueble con cubierta plana
-                const isVesselMueblePair =
-                    (newDetails.isVessel && currDetails.isMueble) ||
-                    (currDetails.isVessel && newDetails.isMueble);
-
-                if (isVesselMueblePair) {
-                    const muebleRaw = newDetails.isMueble ? newDetails.raw : currDetails.raw;
-                    const muebleSku = newDetails.isMueble ? newDetails.sku : currDetails.sku;
-                    if (!muebleRaw.includes("PLANO") && !muebleRaw.includes("CUBIERTA") && !muebleRaw.includes("FLAT")) {
-                        return `El lavamanos tipo Vessel requiere un mueble con cubierta plana.\n\nEl mueble (${muebleSku}) no parece tener cubierta plana según su descripción.`;
-                    }
-                }
-
-                // Regla 3: Familias de SKU incompatibles (ej: baño vs maquinaria)
-                if (newDetails.familyPrefix && currDetails.familyPrefix && newDetails.familyPrefix !== currDetails.familyPrefix) {
-                    return `Los artículos pertenecen a familias de productos diferentes y no son compatibles en un kit.\n\n"${newDetails.sku}" → familia: ${newDetails.familyPrefix}\n"${currDetails.sku}" → familia: ${currDetails.familyPrefix}\n\nUn kit solo debe contener artículos de la misma familia de productos.`;
-                }
-
-                // Regla 4: Dos lavamanos con medidas diferentes → incompatible
-                if (newDetails.isLavamanos && currDetails.isLavamanos) {
-                    if (newDetails.dimension && currDetails.dimension && newDetails.dimension !== currDetails.dimension) {
-                        return `No se pueden combinar dos lavamanos con medidas diferentes en el mismo kit.\n\nLavamanos existente: ${currDetails.sku} (${currDetails.dimension})\nLavamanos nuevo: ${newDetails.sku} (${newDetails.dimension})\n\nUn kit de baño debe tener lavamanos de la misma referencia dimensional.`;
-                    }
-                    // Mismo tipo, misma medida: permitido (ej: kit doble)
-                }
-
-                // Regla 5: Dos muebles con medidas diferentes → incompatible
-                if (newDetails.isMueble && currDetails.isMueble) {
-                    if (newDetails.dimension && currDetails.dimension && newDetails.dimension !== currDetails.dimension) {
-                        return `No se pueden combinar dos muebles con medidas diferentes en el mismo kit.\n\nMueble existente: ${currDetails.sku} (${currDetails.dimension})\nMueble nuevo: ${newDetails.sku} (${newDetails.dimension})\n\nUn kit de baño debe tener muebles de la misma referencia dimensional.`;
-                    }
-                }
+        const handleSelect = async (field: ActiveField, item: any) => {
+            if ((field === "sku" || field === "kit_sku") && item.STATUS === 'INACTIVO') {
+                setDetailedError('Este SKU está inactivo y no puede seleccionarse.');
+                setTimeout(() => setDetailedError(null), 5000);
+                return;
             }
 
-            return null;
-        };
+            const candidateSku = field === "sku" ? item : selectedSku;
+            const candidateColor = field === "color" ? item : selectedColor;
+            const candidateVersion = field === "version" ? item : selectedVersion;
+            const configurationRestriction =
+                selectedAction === "estructura" && (field === "sku" || field === "color" || field === "version")
+                    ? getProductConfigurationRestriction(candidateSku, candidateColor, candidateVersion)
+                    : null;
 
-        const handleSelect = (field: ActiveField, item: any) => {
+            if (configurationRestriction) {
+                setDetailedError(configurationRestriction);
+                setTimeout(() => setDetailedError(null), 7000);
+                return;
+            }
+            if (selectedAction === "estructura" && candidateSku && candidateColor && (field === "sku" || field === "color" || field === "version")) {
+                setIsCheckingDuplicate(true);
+                try {
+                    const existingSku = await findExistingConfiguredSku(candidateSku, candidateColor, candidateVersion);
+                    if (existingSku) {
+                        setDetailedError(getExistingSkuMessage(existingSku));
+                        return;
+                    }
+                } catch (error: any) {
+                    setDetailedError(`No fue posible comprobar si la combinación ya existe: ${error.message}`);
+                    return;
+                } finally {
+                    setIsCheckingDuplicate(false);
+                }
+            }
+            // Limpia inmediatamente cualquier aviso anterior cuando la selección sí es válida.
+            setDetailedError(null);
             if (field === "sku") {
                 setSkuInput(item.SKU);
                 setSelectedSku(item);
@@ -331,6 +640,12 @@ export default function CreacionPage() {
                 setVersionInput(item.CodigoVersion); // Match screenshot: use code instead of name
                 setSelectedVersion(item);
             } else if (field === "kit_sku") {
+                if (!item.isVCode || !item.isVentas) {
+                    const error = "En los kits solo se permiten códigos V marcados como artículos de ventas en SAP.";
+                    setKitCompatError(error);
+                    setTimeout(() => setKitCompatError(null), 6000);
+                    return;
+                }
                 // Prevent duplicates
                 if (kitSelectedItems.some(i => i.SKU === item.SKU)) {
                     setKitInput("");
@@ -340,14 +655,26 @@ export default function CreacionPage() {
                 }
 
                 // Check compatibility rules based on Firplak Catalog
-                const compatibilityError = validateKitCompatibility(item, kitSelectedItems);
+                const compatibilityError = validateKitCandidate(item, kitSelectedItems);
                 if (compatibilityError) {
                     setKitCompatError(compatibilityError);
                     setTimeout(() => setKitCompatError(null), 6000);
                     return; // Stop adding if incompatible
                 }
 
-                setKitSelectedItems(prev => [...prev, item]);
+                const nextKitItems = [...kitSelectedItems, item];
+                if (nextKitItems.length === 2) {
+                    const pairError = getCompleteKitRestriction(nextKitItems);
+                    if (pairError) {
+                        setKitCompatError(pairError);
+                        setTimeout(() => setKitCompatError(null), 8000);
+                        return;
+                    }
+                }
+
+                setKitSelectedItems(nextKitItems);
+                const suggestedName = suggestKitName(nextKitItems);
+                if (suggestedName) setKitName(suggestedName);
                 setKitInput("");
                 setKitResults([]);
             }
@@ -356,26 +683,45 @@ export default function CreacionPage() {
             else if (field === "color") setColorResults([]);
             else if (field === "version") setVersionResults([]);
             else if (field === "kit_sku") setKitResults([]);
-            setActiveField(null);
+            // En kits mantenemos la búsqueda activa para escribir el segundo componente sin desenfocar.
+            setActiveField(field === "kit_sku" ? "kit_sku" : null);
         };
 
-        const SearchDropdown = ({ field, results, isLoading, isMoreLoading }: { field: ActiveField, results: any[], isLoading: boolean, isMoreLoading: boolean }) => {
+        const renderSearchDropdown = ({ field, results, isLoading, isMoreLoading }: { field: ActiveField, results: any[], isLoading: boolean, isMoreLoading: boolean }) => {
             if (results.length === 0 && !isLoading) return null;
 
-            const h1 = (field === "sku" || field === "kit_sku") ? "NRO. ARTÍCULO" : field === "color" ? "CÓDIGO COLOR" : "CÓDIGO VERSIÓN";
-            const h2 = (field === "sku" || field === "kit_sku") ? "DESCRIPCIÓN SAP" : field === "color" ? "DESCRIPCIÓN COLOR" : "DESCRIPCIÓN VERSIÓN";
+            const isGroupSearch = field === "sku" && selectedAction === "de_cero";
+            const h1 = isGroupSearch ? "CÓDIGO" : (field === "sku" || field === "kit_sku") ? "NRO. ARTÍCULO" : field === "color" ? "CÓDIGO COLOR" : "CÓDIGO VERSIÓN";
+            const h2 = isGroupSearch ? "GRUPO DE ARTÍCULOS" : (field === "sku" || field === "kit_sku") ? "DESCRIPCIÓN SAP" : field === "color" ? "DESCRIPCIÓN COLOR" : "DESCRIPCIÓN VERSIÓN";
+
+            // Helper para resaltar el término buscado en el texto
+            const currentInput = field === "sku" ? skuInput : field === "color" ? colorInput : field === "kit_sku" ? kitInput : versionInput;
+            const highlightText = (text: string) => {
+                if (!currentInput.trim() || !text) return <span>{text}</span>;
+                const query = currentInput.trim().toUpperCase();
+                const upper = text.toUpperCase();
+                const idx = upper.indexOf(query);
+                if (idx === -1) return <span>{text}</span>;
+                return (
+                    <span>
+                        {text.slice(0, idx)}
+                        <mark className="bg-yellow-200 text-[#0F172A] rounded px-0.5">{text.slice(idx, idx + query.length)}</mark>
+                        {text.slice(idx + query.length)}
+                    </span>
+                );
+            };
 
             return (
-                <div className={`absolute top-[calc(100%+0.5rem)] left-0 ${field === 'version' ? 'right-0 w-auto' : 'w-[160%]'} bg-white rounded-[1.2rem] shadow-[0_60px_120px_rgba(15,23,42,0.25)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300`}>
+                <div className={`absolute top-[calc(100%-1.5rem)] left-1/2 -translate-x-1/2 ${field === 'version' ? 'w-auto min-w-[100%]' : field === 'kit_sku' ? 'w-[130%]' : 'w-[150%]'} bg-white rounded-[1.2rem] shadow-[0_25px_60px_rgba(15,23,42,0.18)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300`}>
                     {/* Header Match ScreenShot */}
                     <div className="flex bg-[#eff2f5] border-b border-slate-200 font-black text-[0.65rem] tracking-[0.2em] text-[#324f5f]/60 uppercase italic">
-                        <div className="w-[25%] px-8 py-5 border-r border-[#dee2e6]">{h1}</div>
-                        <div className="w-[75%] px-8 py-5">{h2}</div>
+                        <div className="w-[25%] px-6 py-3.5 border-r border-[#dee2e6]">{h1}</div>
+                        <div className="w-[75%] px-6 py-3.5">{h2}</div>
                     </div>
 
                     {/* Scrollable Body Container */}
                     <div
-                        className="max-h-[580px] overflow-y-auto custom-scrollbar bg-white"
+                        className="max-h-[450px] overflow-y-auto custom-scrollbar bg-white"
                         onScroll={(e) => handleScroll(e, field)}
                     >
                         {isLoading ? (
@@ -385,36 +731,67 @@ export default function CreacionPage() {
                                     <span className="text-[0.7rem] font-bold uppercase tracking-[0.6em] text-[#3499CD]/40">Sincronizando Catálogo...</span>
                                 </div>
                             </div>
+                        ) : results.length === 0 ? (
+                            <div className="py-16 text-center">
+                                <span className="text-[0.75rem] font-bold uppercase tracking-widest text-slate-300">Sin resultados para tu búsqueda</span>
+                            </div>
                         ) : (
                             <>
-                                {results.map((item, idx) => (
-                                    <div
-                                        key={`${field}-${idx}`}
-                                        onMouseDown={() => {
-                                            console.log(`Selecting ${field}:`, item);
-                                            handleSelect(field, item);
-                                        }}
-                                        // Highlight Match Screenshot (Light Yellow)
-                                        className="flex w-full group cursor-pointer hover:bg-[#FFFBEB] border-b border-slate-100 last:border-0 transition-colors duration-200"
-                                    >
-                                        <div className="w-[25%] px-8 py-5 font-mono font-black text-[#0F172A] text-lg tracking-tighter border-r border-slate-100 group-hover:text-[#3499CD] transition-colors">
-                                            {(field === "sku" || field === "kit_sku") ? (item.SKU || "S/C") :
-                                                field === "color" ? (item.CodigoColor || "S/C") : (item.CodigoVersion || "S/C")}
+                                {results.map((item, idx) => {
+                                    const stableKey =
+                                        field === 'sku' || field === 'kit_sku' ? item.SKU :
+                                        field === 'color' ? item.CodigoColor :
+                                        item.CodigoVersion;
+
+                                    return (
+                                        <div
+                                            key={stableKey || `${field}-${idx}`}
+                                            onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                console.log(`Selecting ${field}:`, item);
+                                                handleSelect(field, item);
+                                            }}
+                                            className="flex w-full group cursor-pointer hover:bg-[#FFFBEB] border-b border-slate-100 last:border-0 transition-colors duration-200"
+                                        >
+                                            <div className="w-[25%] px-6 py-4 font-mono font-black text-[#0F172A] text-base tracking-tighter border-r border-slate-100 group-hover:text-[#3499CD] transition-colors">
+                                                <div className="flex items-center gap-2">
+                                                    {(field === "sku" || field === "kit_sku") ? highlightText(item.SKU || "S/C") :
+                                                        field === "color" ? highlightText(item.CodigoColor || "S/C") : highlightText(item.CodigoVersion || "S/C")}
+                                                    {(field === 'sku' || field === 'kit_sku') && item.STATUS && (
+                                                        <span className={`rounded-full px-2 py-0.5 text-[0.6rem] font-black uppercase ${item.STATUS === 'ACTIVO' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                            {item.STATUS}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div className="w-[75%] px-6 py-4 font-black text-[#64748B] text-[0.85rem] uppercase group-hover:text-[#0F172A] transition-colors leading-relaxed">
+                                                {(field === "sku" || field === "kit_sku") ? highlightText(item.DESCRIPCION || "SIN NOMBRE") :
+                                                    field === "color" ? highlightText(item.Color || "SIN COLOR") : highlightText(item.Version || "SIN VERSIÓN")}
+                                            </div>
                                         </div>
-                                        <div className="w-[75%] px-8 py-5 font-black text-[#64748B] text-[0.95rem] uppercase group-hover:text-[#0F172A] transition-colors leading-relaxed">
-                                            {(field === "sku" || field === "kit_sku") ? (item.DESCRIPCION || "SIN NOMBRE") :
-                                                field === "color" ? (item.Color || "SIN COLOR") : (item.Version || "SIN VERSIÓN")}
-                                        </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
 
                                 {isMoreLoading && (
-                                    <div className="py-12 bg-slate-50 border-t border-slate-100 flex items-center justify-center gap-4 text-[#3499CD]">
+                                    <div className="py-10 bg-slate-50 border-t border-slate-100 flex items-center justify-center gap-4 text-[#3499CD]">
                                         <Loader2 className="w-6 h-6 animate-spin" />
                                         <span className="text-[0.6rem] font-black uppercase tracking-[0.5em] italic">Ampliando registros...</span>
                                     </div>
                                 )}
 
+                                {!isMoreLoading && hasMore[field as string] && results.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const value = field === "sku" ? skuInput : field === "color" ? colorInput : field === "kit_sku" ? kitInput : versionInput;
+                                            performSearch(field, value, true);
+                                        }}
+                                        className="w-full py-5 bg-slate-50 border-t border-slate-100 text-[#3499CD] text-[0.65rem] font-black uppercase tracking-[0.3em] hover:bg-[#EFF8FC] transition-colors"
+                                    >
+                                        Cargar más resultados
+                                    </button>
+                                )}
                                 {!hasMore[field as string] && results.length > 0 && (
                                     <div className="py-10 bg-slate-50/50 text-center border-t border-slate-50">
                                         <span className="text-[0.55rem] font-black uppercase tracking-widest text-slate-300">Catálogo Completo Cargado</span>
@@ -510,6 +887,26 @@ export default function CreacionPage() {
                 ) : (
                     <div className="w-full max-w-4xl bg-white rounded-[2rem] p-16 shadow-[0_40px_80px_rgba(0,0,0,0.06)] border border-slate-100 space-y-12 relative animate-in zoom-in duration-700 overflow-visible">
 
+                        {detailedError && (
+                            <div className="animate-in slide-in-from-top-4 fade-in duration-300 flex items-start gap-4 p-5 bg-red-50 border-2 border-red-300 rounded-2xl shadow-md" role="alert">
+                                <div className="shrink-0 w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center">
+                                    <AlertTriangle className="w-6 h-6 text-red-500" />
+                                </div>
+                                <div className="flex-1">
+                                    <p className="text-red-700 font-black text-sm uppercase tracking-wide">{detailedError.includes("ya existe en SAP") ? "Ítem ya existente" : detailedError.startsWith("SAP error") ? "Error al consultar SAP" : "Combinación no permitida"}</p>
+                                    <p className="text-red-600 font-medium text-sm mt-1">{detailedError}</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setDetailedError(null)}
+                                    className="p-2 text-red-400 hover:text-red-600 hover:bg-red-100 rounded-xl transition-all"
+                                    aria-label="Cerrar mensaje"
+                                >
+                                    <XCircle className="w-5 h-5" />
+                                </button>
+                            </div>
+                        )}
+
                         {selectedAction === "estructura" ? (
                             <div className="space-y-10 animate-in slide-in-from-bottom-8 duration-500">
                                 {/* Row 1: SKU (Full Width) */}
@@ -530,10 +927,15 @@ export default function CreacionPage() {
                                     {/* SKU Selected Detail */}
                                     {selectedSku && !activeField && (
                                         <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-500">
-                                            <div className="w-full h-20 border-2 border-[#3499CD] rounded-2xl flex items-center justify-center bg-white">
+                                            <div className="w-full h-20 border-2 border-[#3499CD] rounded-2xl flex items-center justify-between gap-4 bg-white px-6">
                                                 <span className="text-[#3499CD] font-black text-2xl tracking-tighter uppercase">
                                                     SKU Base: {selectedSku.SKU}
                                                 </span>
+                                                {selectedSku.STATUS && (
+                                                    <span className={`rounded-full px-3 py-1 text-[0.7rem] font-black uppercase ${selectedSku.STATUS === 'ACTIVO' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                        {selectedSku.STATUS}
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="space-y-1 pl-4">
                                                 <div className="text-[#64748B] text-[0.8rem] font-bold uppercase tracking-wider">Descripción Base</div>
@@ -544,7 +946,7 @@ export default function CreacionPage() {
                                         </div>
                                     )}
 
-                                    <SearchDropdown field="sku" results={skuResults} isLoading={loading.sku} isMoreLoading={loadingMore.sku} />
+                                    {renderSearchDropdown({ field: "sku", results: skuResults, isLoading: loading.sku, isMoreLoading: loadingMore.sku })}
                                 </div>
 
                                 {/* Row 2: Color & Version */}
@@ -577,7 +979,7 @@ export default function CreacionPage() {
                                             </div>
                                         )}
 
-                                        <SearchDropdown field="color" results={colorResults} isLoading={loading.color} isMoreLoading={loadingMore.color} />
+                                        {renderSearchDropdown({ field: "color", results: colorResults, isLoading: loading.color, isMoreLoading: loadingMore.color })}
                                     </div>
 
                                     <div className="relative space-y-4" ref={versionRef}>
@@ -608,7 +1010,7 @@ export default function CreacionPage() {
                                             </div>
                                         )}
 
-                                        <SearchDropdown field="version" results={versionResults} isLoading={loading.version} isMoreLoading={loadingMore.version} />
+                                        {renderSearchDropdown({ field: "version", results: versionResults, isLoading: loading.version, isMoreLoading: loadingMore.version })}
                                     </div>
                                 </div>
                             </div>
@@ -676,19 +1078,40 @@ export default function CreacionPage() {
                                         )}
                                     </div>
 
-                                    <SearchDropdown field="kit_sku" results={kitResults} isLoading={loading.kit_sku} isMoreLoading={loadingMore.kit_sku} />
+                                    {renderSearchDropdown({ field: "kit_sku", results: kitResults, isLoading: loading.kit_sku, isMoreLoading: loadingMore.kit_sku })}
                                 </div>
 
                                 {/* Kit Name Field */}
                                 <div className="space-y-4">
                                     <label className="text-[#64748B] font-bold text-[1rem] ml-2">Nombre del Kit</label>
-                                    <input
-                                        type="text"
+                                    <textarea
                                         value={kitName}
                                         onChange={(e) => setKitName(e.target.value.toUpperCase())}
-                                        placeholder="Ej: KIT MUEBLE + LAVAMAN"
-                                        className="w-full h-16 px-10 rounded-2xl border-2 border-[#E2E8F0] bg-white focus:border-[#3499CD] transition-all text-xl text-[#0F172A] font-black placeholder:text-slate-200 shadow-md text-center uppercase"
+                                        placeholder="Ej: KIT LVM OSLO 79X48 MARFIL-MUEBLE VITELI 79X48"
+                                        rows={3}
+                                        className="w-full min-h-32 px-8 py-6 rounded-2xl border-2 border-[#E2E8F0] bg-white focus:border-[#3499CD] transition-all text-lg text-[#0F172A] font-black placeholder:text-slate-200 shadow-md text-left uppercase resize-y leading-relaxed"
                                     />
+                                </div>
+
+                                {/* Additional text appended to the kit name */}
+                                <div className="space-y-4">
+                                    <label className="text-[#64748B] font-bold text-[1rem] ml-2">Adicional u observación para el nombre</label>
+                                    <input
+                                        type="text"
+                                        value={kitAdditional}
+                                        onChange={(e) => setKitAdditional(e.target.value.toUpperCase())}
+                                        placeholder="Ej: VERSIÓN ESPECIAL O NOMBRE DEL CLIENTE"
+                                        className="w-full h-16 px-8 rounded-2xl border-2 border-[#E2E8F0] bg-white focus:border-[#3499CD] transition-all text-lg text-[#0F172A] font-bold placeholder:text-slate-200 shadow-md uppercase"
+                                    />
+                                    <p className="px-2 text-sm font-medium text-slate-400">
+                                        Se agregará al final del nombre separado por un guion.
+                                    </p>
+                                    {kitName.trim() && kitAdditional.trim() && (
+                                        <div className="rounded-2xl border border-sky-100 bg-sky-50 px-6 py-4">
+                                            <span className="block text-[0.7rem] font-black uppercase tracking-wider text-[#3499CD] mb-1">Nombre final</span>
+                                            <p className="text-sm font-bold text-[#0F364B] break-words">{kitName.trim()} - {kitAdditional.trim()}</p>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         ) : (
@@ -724,7 +1147,7 @@ export default function CreacionPage() {
                                             </div>
                                         )}
 
-                                        <SearchDropdown field="color" results={colorResults} isLoading={loading.color} isMoreLoading={loadingMore.color} />
+                                        {renderSearchDropdown({ field: "color", results: colorResults, isLoading: loading.color, isMoreLoading: loadingMore.color })}
                                     </div>
 
                                     {/* Version */}
@@ -756,20 +1179,20 @@ export default function CreacionPage() {
                                             </div>
                                         )}
 
-                                        <SearchDropdown field="version" results={versionResults} isLoading={loading.version} isMoreLoading={loadingMore.version} />
+                                        {renderSearchDropdown({ field: "version", results: versionResults, isLoading: loading.version, isMoreLoading: loadingMore.version })}
                                     </div>
                                 </div>
 
-                                {/* Row 2: Buscar Artículos (full width) */}
+                                {/* Row 2: Grupo de artículos SAP (full width) */}
                                 <div className="relative space-y-4" ref={skuRef}>
-                                    <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Artículos</label>
+                                    <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Grupo de artículos</label>
                                     <div className={`relative transition-all duration-700 ${activeField === 'sku' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                         <input
                                             type="text"
                                             value={skuInput}
                                             onFocus={() => handleFocus("sku")}
                                             onChange={(e) => setSkuInput(e.target.value)}
-                                            placeholder="Ingrese SKU o descripción..."
+                                            placeholder="Buscar por código o palabra..."
                                             className="w-full h-20 pl-10 pr-16 rounded-3xl border-2 border-[#E2E8F0] bg-white focus:border-[#3499CD] transition-all text-xl text-[#0F172A] font-medium placeholder:text-slate-300 shadow-sm text-center"
                                         />
                                         <Search className={`absolute right-8 top-1/2 -translate-y-1/2 w-7 h-7 ${activeField === 'sku' ? 'text-[#3499CD]' : 'text-[#334155]'}`} />
@@ -777,19 +1200,24 @@ export default function CreacionPage() {
 
                                     {selectedSku && !activeField && (
                                         <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-500">
-                                            <div className="w-full h-20 border-2 border-[#3499CD] rounded-2xl flex items-center justify-center bg-white">
+                                            <div className="w-full h-20 border-2 border-[#3499CD] rounded-2xl flex items-center justify-between gap-4 bg-white px-6">
                                                 <span className="text-[#3499CD] font-black text-2xl tracking-tighter uppercase">
-                                                    SKU: {selectedSku.SKU}
+                                                    Grupo: {selectedSku.GROUP_NAME || selectedSku.DESCRIPCION}
                                                 </span>
+                                                {selectedSku.STATUS && (
+                                                    <span className={`rounded-full px-3 py-1 text-[0.7rem] font-black uppercase ${selectedSku.STATUS === 'ACTIVO' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                        {selectedSku.STATUS}
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="space-y-1 pl-4">
-                                                <div className="text-[#64748B] text-[0.8rem] font-bold uppercase tracking-wider">Descripción</div>
-                                                <div className="text-[#0F364B] text-xl font-black uppercase leading-tight">{selectedSku.DESCRIPCION}</div>
+                                                <div className="text-[#64748B] text-[0.8rem] font-bold uppercase tracking-wider">Código interno del grupo</div>
+                                                <div className="text-[#0F364B] text-xl font-black uppercase leading-tight">{selectedSku.GROUP_CODE || selectedSku.SKU}</div>
                                             </div>
                                         </div>
                                     )}
 
-                                    <SearchDropdown field="sku" results={skuResults} isLoading={loading.sku} isMoreLoading={loadingMore.sku} />
+                                    {renderSearchDropdown({ field: "sku", results: skuResults, isLoading: loading.sku, isMoreLoading: loadingMore.sku })}
                                 </div>
 
                                 {/* Row 3: Comentarios */}
@@ -810,11 +1238,13 @@ export default function CreacionPage() {
                         <div className="pt-8 flex flex-col gap-4 relative z-0">
                             <button
                                 onClick={handleSubmit}
-                                disabled={isSubmitting || submitSuccess}
-                                className={`w-full h-16 text-white font-black text-xl tracking-[0.2em] rounded-2xl shadow-xl transition-all uppercase flex items-center justify-center gap-3
+                                disabled={isSubmitting || isCheckingDuplicate || submitSuccess || Boolean(detailedError) || Boolean(kitCompatError)}
+                                className={`w-full h-16 text-white font-black text-xl tracking-[0.2em] rounded-2xl shadow-xl transition-all uppercase flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#0F364B] disabled:active:scale-100
                                 ${submitSuccess ? 'bg-green-500 scale-[1.02]' : 'bg-[#0F364B] hover:bg-[#0A2432] active:scale-[0.98]'}`}
                             >
-                                {isSubmitting ? (
+                                {detailedError || kitCompatError ? (
+                                    <span>CORRIJA LA RESTRICCIÓN</span>
+                                ) : isSubmitting || isCheckingDuplicate ? (
                                     <Loader2 className="w-8 h-8 animate-spin" />
                                 ) : submitSuccess ? (
                                     <>
@@ -828,7 +1258,7 @@ export default function CreacionPage() {
 
                             <button
                                 onClick={() => setSelectedAction(null)}
-                                disabled={isSubmitting}
+                                disabled={isSubmitting || isCheckingDuplicate}
                                 className="w-full h-16 border-2 border-[#0F364B] text-[#0F364B] font-black text-xl tracking-[0.2em] rounded-2xl hover:bg-slate-50 transition-all uppercase disabled:opacity-50"
                             >
                                 VOLVER ATRÁS

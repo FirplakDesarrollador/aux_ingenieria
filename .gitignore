@@ -40,3 +40,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local Codex runtime and one-off comparison scripts
+/.codex-runtime/
+/compare*.js

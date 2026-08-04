@@ -1,8 +1,8 @@
 "use client";
 
 import {
-    ChevronLeft, Activity, Search, Loader2, Bug, Database,
-    CheckCircle2, Clock, XCircle, AlertCircle, Copy, PlusCircle, Package, Pencil, MessageSquare
+    ChevronLeft, Activity, Loader2, Bug, Database,
+    CheckCircle2, Clock, XCircle, AlertCircle, Copy, PlusCircle, Package, Pencil, MessageSquare, Ban
 } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
@@ -41,6 +41,11 @@ export default function EstadoPage() {
 
     const [categoriaSolicitudes, setCategoriaSolicitudes] = useState<any[]>([]);
     const [loadingCategoriaSolicitudes, setLoadingCategoriaSolicitudes] = useState(false);
+
+    // Modal de rechazo
+    const [showRechazoModal, setShowRechazoModal] = useState(false);
+    const [motivoRechazo, setMotivoRechazo] = useState("");
+    const [isSavingRechazo, setIsSavingRechazo] = useState(false);
 
     const skuRef = useRef<HTMLDivElement>(null);
     const fetchingRef = useRef(false);
@@ -88,7 +93,32 @@ export default function EstadoPage() {
                     .order("created_at", { ascending: false });
 
                 if (data && !error) {
-                    setCategoriaSolicitudes(data);
+                    const solicitudes = data as any[];
+                    const skus = Array.from(new Set(
+                        solicitudes
+                            .map((sol: any) => sol.sku_referencia)
+                            .filter((sku: any): sku is string => typeof sku === "string" && sku.trim().length > 0)
+                    ));
+
+                    const descripcionPorSku = new Map<string, string>();
+                    await Promise.all(skus.map(async (sku) => {
+                        try {
+                            const response = await fetch(`/api/sap/skus?exact=${encodeURIComponent(sku)}&limit=1`);
+                            if (!response.ok) return;
+                            const payload = await response.json();
+                            const articulo = payload.data?.[0];
+                            if (articulo?.DESCRIPCION) descripcionPorSku.set(sku, articulo.DESCRIPCION);
+                        } catch (err) {
+                            console.error(`No se pudo cargar la descripción del SKU ${sku}`, err);
+                        }
+                    }));
+
+                    setCategoriaSolicitudes(solicitudes.map((sol: any) => ({
+                        ...sol,
+                        sku_descripcion: sol.sku_referencia
+                            ? descripcionPorSku.get(sol.sku_referencia) || null
+                            : null,
+                    })));
                 }
             } catch (err) {
                 console.error("Error fetching solicitudes", err);
@@ -144,16 +174,17 @@ export default function EstadoPage() {
 
     useEffect(() => {
         if (activeSearch) {
-            const timer = setTimeout(() => performSearch(skuInput), 300);
+            const timer = setTimeout(() => performSearch(""), 300);
             return () => clearTimeout(timer);
         }
-    }, [skuInput, activeSearch]);
+    }, [activeSearch, performSearch]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (skuRef.current && !skuRef.current.contains(event.target as Node)) {
                 setSkuResults([]);
                 setHasMore(true);
+                setActiveSearch(false);
             }
         };
         document.addEventListener("mousedown", handleClickOutside);
@@ -216,13 +247,13 @@ export default function EstadoPage() {
         setSkuInput(sol.sku_referencia || sol.kit_nombre || "CÓDIGO NUEVO");
         setSelectedSku({
             SKU: sol.sku_referencia || (sol.tipo === "kit" ? "KIT CREADO" : "CÓDIGO NUEVO"),
-            DESCRIPCION: "CARGANDO..."
+            DESCRIPCION: sol.sku_descripcion || "CARGANDO..."
         });
         setSkuResults([]);
         setActiveSearch(false);
         setSolicitudInfo(sol);
 
-        if (sol.sku_referencia && (sol.tipo === 'estructura' || sol.tipo === 'modificacion')) {
+        if (sol.sku_referencia && !sol.sku_descripcion && (sol.tipo === 'estructura' || sol.tipo === 'modificacion')) {
             try {
                 const res = await fetch(`/api/sap/skus?search=${encodeURIComponent(sol.sku_referencia)}&limit=1`);
                 const { data } = await res.json();
@@ -243,21 +274,120 @@ export default function EstadoPage() {
         }
     };
 
+    const sendStatusNotification = async (solicitud: any, newStatus: string, rejectionReason?: string) => {
+        const kitSkus = Array.isArray(solicitud.kit_articulos)
+            ? solicitud.kit_articulos.map((item: any) => item?.SKU).filter(Boolean).join(", ")
+            : "";
+        const identifier =
+            solicitud.sku_referencia ||
+            kitSkus ||
+            solicitud.kit_nombre ||
+            "CÓDIGO NUEVO (SIN SKU ASIGNADO)";
+        const description =
+            selectedSku?.DESCRIPCION ||
+            solicitud.sku_descripcion ||
+            solicitud.nueva_descripcion ||
+            solicitud.kit_nombre ||
+            "Sin descripción registrada";
+        const typeLabel: Record<string, string> = {
+            estructura: "Código desde referencia",
+            de_cero: "Código desde cero",
+            kit: "Kit",
+            modificacion: "Modificación",
+        };
+        const contentLines = [
+            `SKU de la solicitud: ${identifier}`,
+            `Estado de la solicitud: ${newStatus}`,
+            `Tipo de solicitud: ${typeLabel[solicitud.tipo] || solicitud.tipo || "No especificado"}`,
+            `Descripción: ${description}`,
+            `Solicitante: ${solicitud.usuario_email || "No registrado"}`,
+        ];
+
+        if (rejectionReason) contentLines.push(`Motivo del rechazo: ${rejectionReason}.`);
+
+        const response = await fetch("/api/notifications/status", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                responsable: "auxingenieria@firplak.com",
+                titulo: `SKU ${identifier} | Estado: ${newStatus}`,
+                contenido: contentLines.join("\n"),
+            }),
+        });
+
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || "No fue posible enviar la notificación.");
+    };
     const handleStatusChange = async (newStatus: string) => {
         if (!solicitudInfo || !solicitudInfo.id) return;
+
+        // Si el estado nuevo es RECHAZADO, mostrar el modal primero
+        if (newStatus === "RECHAZADO") {
+            setMotivoRechazo("");
+            setShowRechazoModal(true);
+            return;
+        }
+
         try {
+            // Al cambiar a un estado distinto de RECHAZADO, limpiamos el prefijo de rechazo en comentarios
             const { error } = await supabase
                 .from("solicitudes")
                 .update({ estado: newStatus })
                 .eq("id", solicitudInfo.id);
             if (error) throw error;
 
-            setSolicitudInfo({ ...solicitudInfo, estado: newStatus });
+            const updated = { ...solicitudInfo, estado: newStatus };
+            setSolicitudInfo(updated);
             // Update in the listing as well
             setCategoriaSolicitudes(prev => prev.map(s => s.id === solicitudInfo.id ? { ...s, estado: newStatus } : s));
+
+            try {
+                await sendStatusNotification(updated, newStatus);
+            } catch (notificationError: any) {
+                console.error("Estado actualizado, pero falló la notificación", notificationError);
+                alert(`El estado se actualizó, pero no se pudo enviar la notificación: ${notificationError.message}`);
+            }
         } catch (err: any) {
             console.error("Error updating status", err);
             alert("Hubo un error al actualizar el estado");
+        }
+    };
+
+    const handleConfirmarRechazo = async () => {
+        if (!solicitudInfo || !solicitudInfo.id) return;
+        if (!motivoRechazo.trim()) {
+            alert("Por favor ingresa el motivo del rechazo.");
+            return;
+        }
+
+        setIsSavingRechazo(true);
+        try {
+            // Guardamos el motivo en 'comentarios' con prefijo [RECHAZO] ya que la columna
+            // motivo_rechazo aún no existe en el schema de Supabase.
+            const motivoConPrefijo = `[RECHAZO]: ${motivoRechazo.trim()}`;
+            const { error } = await supabase
+                .from("solicitudes")
+                .update({ estado: "RECHAZADO", comentarios: motivoConPrefijo })
+                .eq("id", solicitudInfo.id);
+            if (error) throw error;
+
+            const updated = { ...solicitudInfo, estado: "RECHAZADO", comentarios: motivoConPrefijo };
+            setSolicitudInfo(updated);
+            setCategoriaSolicitudes(prev => prev.map(s => s.id === solicitudInfo.id ? { ...s, estado: "RECHAZADO" } : s));
+            setShowRechazoModal(false);
+            setMotivoRechazo("");
+
+            try {
+                await sendStatusNotification(updated, "RECHAZADO", motivoRechazo.trim());
+            } catch (notificationError: any) {
+                console.error("Rechazo guardado, pero falló la notificación", notificationError);
+                alert(`El rechazo se guardó, pero no se pudo enviar la notificación: ${notificationError.message}`);
+            }
+        } catch (err: any) {
+            console.error("Error al guardar rechazo", err);
+            alert("Hubo un error al guardar el rechazo: " + err.message);
+        } finally {
+            setIsSavingRechazo(false);
         }
     };
 
@@ -345,19 +475,19 @@ export default function EstadoPage() {
 
                     <div className="space-y-10 animate-in slide-in-from-bottom-8 duration-500">
 
-                        {/* Buscar artículo */}
+                        {/* Seleccionar artículo */}
                         <div className="relative space-y-4" ref={skuRef}>
-                            <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Consultar Estado de Artículo</label>
+                            <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Seleccionar Artículo</label>
                             <div className={`relative transition-all duration-700 ${activeSearch ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                 <input
                                     type="text"
                                     value={skuInput}
-                                    onFocus={() => { setActiveSearch(true); performSearch(skuInput); }}
-                                    onChange={(e) => setSkuInput(e.target.value)}
-                                    placeholder="Ingrese SKU o descripción..."
-                                    className="w-full h-20 pl-10 pr-16 rounded-3xl border-2 border-[#E2E8F0] bg-white focus:border-[#3499CD] transition-all text-xl text-[#0F172A] font-medium placeholder:text-slate-300 shadow-sm text-center"
+                                    onFocus={() => setActiveSearch(true)}
+                                    readOnly
+                                    placeholder="Seleccione un SKU..."
+                                    className="w-full h-20 pl-10 pr-16 rounded-3xl border-2 border-[#E2E8F0] bg-white focus:border-[#3499CD] transition-all text-xl text-[#0F172A] font-medium placeholder:text-slate-300 shadow-sm text-center cursor-pointer"
                                 />
-                                <Search className={`absolute right-8 top-1/2 -translate-y-1/2 w-7 h-7 ${activeSearch ? 'text-[#3499CD]' : 'text-[#334155]'}`} />
+                                <ChevronLeft className={`absolute right-8 top-1/2 -translate-y-1/2 -rotate-90 w-7 h-7 pointer-events-none transition-transform ${activeSearch ? 'text-[#3499CD] rotate-90' : 'text-[#334155]'}`} />
                             </div>
 
                             {/* Artículo seleccionado + badge estado */}
@@ -437,6 +567,19 @@ export default function EstadoPage() {
                                             </h4>
                                             <div className="text-[#0F364B] font-medium text-md leading-relaxed bg-white p-4 rounded-xl shadow-sm border border-amber-100">
                                                 {solicitudInfo.comentarios}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Mostrar Motivo de Rechazo (guardado en comentarios con prefijo [RECHAZO]) */}
+                                    {solicitudInfo?.estado === 'RECHAZADO' && solicitudInfo?.comentarios?.startsWith('[RECHAZO]:') && (
+                                        <div className="space-y-3 mt-4 border-2 border-red-200 rounded-2xl p-6 bg-red-50 animate-in fade-in duration-500">
+                                            <h4 className="text-red-600 text-[0.8rem] font-bold uppercase tracking-wider flex items-center gap-2">
+                                                <Ban className="w-4 h-4" />
+                                                Motivo del Rechazo
+                                            </h4>
+                                            <div className="text-[#0F364B] font-medium text-md leading-relaxed bg-white p-4 rounded-xl shadow-sm border border-red-100">
+                                                {solicitudInfo.comentarios.replace('[RECHAZO]: ', '')}
                                             </div>
                                         </div>
                                     )}
@@ -530,6 +673,11 @@ export default function EstadoPage() {
                                                             <span className="text-[#0F364B] font-black text-xl uppercase tracking-tighter">
                                                                 {sol.sku_referencia || sol.kit_nombre || "CÓDIGO NUEVO"}
                                                             </span>
+                                                            {(sol.sku_descripcion || sol.kit_nombre) && (
+                                                                <span className="text-[#64748B] text-sm font-bold uppercase tracking-wide">
+                                                                    {sol.sku_descripcion || sol.kit_nombre}
+                                                                </span>
+                                                            )}
                                                             <div className="flex items-center gap-3">
                                                                 <span className="text-slate-400 text-xs font-bold uppercase tracking-widest">
                                                                     {new Date(sol.created_at).toLocaleDateString()}
@@ -553,7 +701,7 @@ export default function EstadoPage() {
 
                             {/* Dropdown resultados */}
                             {(skuResults.length > 0 || loading) && (
-                                <div className="absolute top-[calc(100%+0.5rem)] left-0 w-full bg-white rounded-[1.2rem] shadow-[0_60px_120px_rgba(15,23,42,0.25)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300">
+                                <div className="absolute top-[7.5rem] left-0 w-full bg-white rounded-[1.2rem] shadow-[0_60px_120px_rgba(15,23,42,0.25)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300">
                                     <div className="flex bg-[#eff2f5] border-b border-slate-200 font-black text-[0.65rem] tracking-[0.2em] text-[#324f5f]/60 uppercase italic">
                                         <div className="w-[25%] px-8 py-5 border-r border-[#dee2e6]">NRO. ARTÍCULO</div>
                                         <div className="w-[75%] px-8 py-5">DESCRIPCIÓN SAP</div>
@@ -568,7 +716,7 @@ export default function EstadoPage() {
                                             <>
                                                 {skuResults.map((item, idx) => (
                                                     <div
-                                                        key={idx}
+                                                        key={item.SKU || idx}
                                                         onMouseDown={() => handleSelect(item)}
                                                         className="flex w-full group cursor-pointer hover:bg-[#FFFBEB] border-b border-slate-100 last:border-0 transition-colors duration-200"
                                                     >
@@ -607,6 +755,75 @@ export default function EstadoPage() {
                         >
                             VOLVER ATRÁS
                         </button>
+                    </div>
+                </div>
+            )}
+
+            {/* ── MODAL DE RECHAZO ── */}
+            {showRechazoModal && (
+                <div className="fixed inset-0 z-[9999] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-in fade-in duration-300">
+                    <div className="w-full max-w-lg bg-white rounded-[2rem] shadow-[0_60px_120px_rgba(0,0,0,0.3)] border border-red-100 overflow-hidden animate-in zoom-in slide-in-from-bottom-4 duration-500">
+                        {/* Header del modal */}
+                        <div className="px-10 pt-10 pb-6 border-b border-red-50">
+                            <div className="flex items-center gap-4 mb-2">
+                                <div className="p-3 bg-red-100 rounded-2xl">
+                                    <XCircle className="w-8 h-8 text-red-500" />
+                                </div>
+                                <div>
+                                    <h2 className="text-[#0F172A] font-black text-2xl tracking-tight">Rechazar Solicitud</h2>
+                                    <p className="text-slate-400 font-medium text-sm">Ingresa el motivo para que el solicitante pueda corregir</p>
+                                </div>
+                            </div>
+                            {solicitudInfo?.sku_referencia && (
+                                <div className="mt-4 px-4 py-3 bg-red-50 rounded-xl border border-red-100">
+                                    <span className="text-red-500 text-xs font-bold uppercase tracking-widest">Solicitud: </span>
+                                    <span className="text-[#0F172A] font-black">{solicitudInfo.sku_referencia}</span>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Cuerpo del modal */}
+                        <div className="px-10 py-8 space-y-4">
+                            <label className="text-[#64748B] font-bold text-[0.9rem] ml-2 block">
+                                Motivo del Rechazo <span className="text-red-400">*</span>
+                            </label>
+                            <textarea
+                                rows={5}
+                                value={motivoRechazo}
+                                onChange={(e) => setMotivoRechazo(e.target.value)}
+                                placeholder="Ej: La descripción del artículo no cumple con el formato estándar de Firplak. Por favor revisar la nomenclatura de colores..."
+                                autoFocus
+                                className="w-full px-6 py-5 rounded-2xl border-2 border-red-200 bg-white focus:border-red-400 focus:outline-none transition-all text-[#0F172A] font-medium placeholder:text-slate-300 shadow-sm resize-none text-sm leading-relaxed"
+                            />
+                            <p className="text-slate-300 text-xs font-bold uppercase tracking-wider ml-2">
+                                {motivoRechazo.length} caracteres
+                            </p>
+                        </div>
+
+                        {/* Botones del modal */}
+                        <div className="px-10 pb-10 flex gap-4">
+                            <button
+                                onClick={() => { setShowRechazoModal(false); setMotivoRechazo(""); }}
+                                disabled={isSavingRechazo}
+                                className="flex-1 h-14 border-2 border-slate-200 text-slate-500 font-black text-sm tracking-[0.2em] rounded-2xl hover:bg-slate-50 transition-all uppercase disabled:opacity-50"
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                onClick={handleConfirmarRechazo}
+                                disabled={isSavingRechazo || !motivoRechazo.trim()}
+                                className="flex-1 h-14 bg-red-500 hover:bg-red-600 text-white font-black text-sm tracking-[0.2em] rounded-2xl transition-all uppercase flex items-center justify-center gap-3 shadow-lg hover:shadow-red-200 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]"
+                            >
+                                {isSavingRechazo ? (
+                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                ) : (
+                                    <>
+                                        <XCircle className="w-5 h-5" />
+                                        Confirmar Rechazo
+                                    </>
+                                )}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
