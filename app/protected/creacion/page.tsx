@@ -7,6 +7,18 @@ import { getCompleteKitRestriction, suggestKitName, validateKitCandidate } from 
 
 type ActiveField = "sku" | "color" | "version" | "kit_sku" | null;
 
+const FieldHelp = ({ label, help, large = false }: { label: string; help: string; large?: boolean }) => (
+    <div className="group/field-help relative ml-2 flex w-fit items-center gap-2">
+        <label className={`font-bold text-[#64748B] ${large ? "text-[1rem]" : "text-[0.9rem]"}`}>{label}</label>
+        <button type="button" aria-label={`Ver ejemplo de ${label}`} className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-[#3499CD] text-[0.7rem] font-black leading-none text-[#3499CD] outline-none transition-transform hover:scale-110 focus:scale-110">
+            ?
+        </button>
+        <div className="pointer-events-none absolute left-0 top-full z-[220] mt-3 w-[360px] max-w-[80vw] rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083] opacity-0 shadow-xl transition-all duration-200 group-hover/field-help:opacity-100 group-focus-within/field-help:opacity-100">
+            <span className="font-black text-[#0F364B]">Ejemplo: </span>{help}
+        </div>
+    </div>
+);
+
 // El blanco 0100 es el único acabado compartido entre muebles y productos
 // de mármol/fibra de vidrio.
 const SHARED_COLOR_CODES = new Set(["0100"]);
@@ -1161,7 +1173,7 @@ export default function CreacionPage() {
                             <div className="space-y-10 animate-in slide-in-from-bottom-8 duration-500">
                                 {/* Row 1: SKU (Full Width) */}
                                 <div className="relative space-y-4" ref={skuRef}>
-                                    <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Código de Referencia</label>
+                                    <FieldHelp label="Buscar Código de Referencia" help="Escribe un SKU de venta que comience por V o una palabra de la descripción, por ejemplo VHEM06 o GALÁPAGOS." />
                                     <div className={`relative transition-all duration-700 ${activeField === 'sku' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                         <input
                                             type="text"
@@ -1202,7 +1214,7 @@ export default function CreacionPage() {
                                 {/* Row 2: Color & Version */}
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 relative items-start">
                                     <div className="relative space-y-4" ref={colorRef}>
-                                        <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Color</label>
+                                        <FieldHelp label="Buscar Color" help="Busca por código o nombre, por ejemplo 0100 o BLANCO. La aplicación validará si el acabado corresponde al producto." />
                                         <div className={`relative transition-all duration-700 ${activeField === 'color' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1233,15 +1245,7 @@ export default function CreacionPage() {
                                     </div>
 
                                     <div className="relative space-y-4" ref={versionRef}>
-                                        <div className="group/version-help relative ml-2 flex w-fit items-center gap-2">
-                                            <label className="text-[#64748B] font-bold text-[0.9rem]">Buscar Versión</label>
-                                            <button type="button" aria-label="Ver ejemplo de versiones" className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-[#3499CD] text-[0.7rem] font-black leading-none text-[#3499CD] outline-none transition-transform hover:scale-110 focus:scale-110">
-                                                ?
-                                            </button>
-                                            <div className="pointer-events-none absolute left-0 top-full z-[220] mt-3 w-[340px] rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083] opacity-0 shadow-xl transition-all duration-200 group-hover/version-help:opacity-100 group-focus-within/version-help:opacity-100">
-                                                <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
-                                            </div>
-                                        </div>
+                                        <FieldHelp label="Buscar Versión" help="La versión identifica una variación del mismo producto, como un mesón sin perforación o con perforación. Búscala por código o nombre." />
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1297,7 +1301,7 @@ export default function CreacionPage() {
                                         </div>
                                     )}
 
-                                    <label className="text-[#64748B] font-bold text-[1rem] ml-2">Añadir Artículo al Kit</label>
+                                    <FieldHelp large label="Añadir Artículo al Kit" help="Busca un SKU V o una palabra de su descripción. Solo se aceptan artículos activos, de ventas, con LDM válida y compatibles entre sí." />
                                     <div className={`relative transition-all duration-700 ${activeField === 'kit_sku' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                         <input
                                             type="text"
@@ -1351,7 +1355,7 @@ export default function CreacionPage() {
 
                                 {/* Kit Name Field */}
                                 <div className="space-y-4">
-                                    <label className="text-[#64748B] font-bold text-[1rem] ml-2">Nombre del Kit</label>
+                                    <FieldHelp large label="Nombre del Kit" help="Describe los productos principales del kit, por ejemplo KIT LVM OSLO 79X48 - MUEBLE VITELI 79X48." />
                                     <textarea
                                         value={kitName}
                                         onChange={(e) => setKitName(e.target.value.toUpperCase())}
@@ -1388,7 +1392,7 @@ export default function CreacionPage() {
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 relative items-start">
                                     {/* Color */}
                                     <div className="relative space-y-4" ref={colorRef}>
-                                        <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Color</label>
+                                        <FieldHelp label="Buscar Color" help="Busca por código o nombre, por ejemplo 0100 o BLANCO. El color debe ser compatible con el grupo de artículos elegido." />
                                         <div className={`relative transition-all duration-700 ${activeField === 'color' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1420,15 +1424,7 @@ export default function CreacionPage() {
 
                                     {/* Version */}
                                     <div className="relative space-y-4" ref={versionRef}>
-                                        <div className="group/version-help relative ml-2 flex w-fit items-center gap-2">
-                                            <label className="text-[#64748B] font-bold text-[0.9rem]">Buscar Versión</label>
-                                            <button type="button" aria-label="Ver ejemplo de versiones" className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-[#3499CD] text-[0.7rem] font-black leading-none text-[#3499CD] outline-none transition-transform hover:scale-110 focus:scale-110">
-                                                ?
-                                            </button>
-                                            <div className="pointer-events-none absolute left-0 top-full z-[220] mt-3 w-[340px] rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083] opacity-0 shadow-xl transition-all duration-200 group-hover/version-help:opacity-100 group-focus-within/version-help:opacity-100">
-                                                <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
-                                            </div>
-                                        </div>
+                                        <FieldHelp label="Buscar Versión" help="La versión identifica una variación del producto, como sin perforación o con perforación. Búscala por código o nombre." />
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1461,7 +1457,7 @@ export default function CreacionPage() {
 
                                 {/* Row 2: Grupo de artículos SAP (full width) */}
                                 <div className="relative space-y-4" ref={skuRef}>
-                                    <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Grupo de artículos</label>
+                                    <FieldHelp label="Grupo de artículos" help="Selecciona la familia SAP del nuevo producto, por ejemplo MUEBLES, MÁRMOL SINTÉTICO o FIBRA DE VIDRIO." />
                                     <div className={`relative transition-all duration-700 ${activeField === 'sku' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                         <input
                                             type="text"
@@ -1498,7 +1494,7 @@ export default function CreacionPage() {
 
                                 {/* Row 3: Comentarios */}
                                 <div className="space-y-4">
-                                    <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Insertar comentarios</label>
+                                    <FieldHelp label="Insertar comentarios" help="Explica el producto solicitado y cualquier detalle que no esté representado por el color o la versión." />
                                     <textarea
                                         rows={4}
                                         value={comentarios}
