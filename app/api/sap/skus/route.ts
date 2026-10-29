@@ -10,6 +10,7 @@ export async function GET(request: Request) {
     const vOnly = searchParams.get("vOnly") === "true";
     const kitComponents = searchParams.get("kitComponents") === "true";
     const exact = (searchParams.get("exact") || "").trim().toUpperCase();
+    const validateKit = searchParams.get("validateKit") === "true";
 
     try {
         const filters: string[] = [];
@@ -75,7 +76,7 @@ export async function GET(request: Request) {
             return (a.ItemCode || '').localeCompare(b.ItemCode || '');
         });
 
-        const formattedData = rawItems.map((item: any) => {
+        let formattedData = rawItems.map((item: any) => {
             // En SAP Business One Service Layer el indicador se llama `Valid`.
             // `ValidFor` no pertenece a la entidad Items y provoca un error 400.
             const isActive = item.Frozen !== 'tYES' && item.Valid !== 'tNO';
@@ -88,6 +89,36 @@ export async function GET(request: Request) {
                 isActive,
             };
         });
+
+        if (exact && validateKit && formattedData.length > 0) {
+            formattedData = await Promise.all(formattedData.map(async item => {
+                const normalizedDescription = String(item.DESCRIPCION || "").toUpperCase();
+                const isSpa = item.SKU?.startsWith("VHPT") || normalizedDescription.includes("SPA");
+                const escapedSku = String(item.SKU).replace(/'/g, "''");
+                const treeResponse = await fetchSAP(`/ProductTrees('${escapedSku}')`);
+
+                if (treeResponse.status === 404) {
+                    return { ...item, hasProductTree: false, isSpa, isMultipersonal: false };
+                }
+                if (!treeResponse.ok) {
+                    const details = await treeResponse.text().catch(() => treeResponse.statusText);
+                    throw new Error(`SAP error ${treeResponse.status} al validar la LDM: ${details}`);
+                }
+
+                const productTree = await treeResponse.json();
+                const lines: any[] = productTree.ProductTreeLines || [];
+                const hasProductTree = lines.length > 0;
+                const isMultipersonal = isSpa && lines.some(line =>
+                    String(`${line.ItemName || ""} ${line.LineText || ""}`)
+                        .toUpperCase()
+                        .normalize("NFD")
+                        .replace(/[\u0300-\u036f]/g, "")
+                        .includes("MULTIPERSONAL")
+                );
+
+                return { ...item, hasProductTree, isSpa, isMultipersonal };
+            }));
+        }
 
         // hasMore: SAP envía nextLink, o como fallback si recibimos exactamente 'limit' items
         const hasMore = !!(data['odata.nextLink'] || data['@odata.nextLink']) || rawItems.length >= limit;

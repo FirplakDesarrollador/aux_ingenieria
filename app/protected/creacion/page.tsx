@@ -28,6 +28,24 @@ const MATERIAL_ALLOWED_COLOR_CODES = new Set([
     ...MATERIAL_ONLY_COLOR_CODES,
     ...SHARED_COLOR_CODES,
 ]);
+// Acabados de la línea mármol/granito. No son fabricables en hidroaeros,
+// hidromasajes, tinas ni en kits derivados de esas familias.
+const MARBLE_LINE_COLOR_CODES = new Set([
+    "0347", "0348", "0360", "0380", "0381", "0382", "0383",
+    "0900", "0901", "0902", "0904", "0943", "0947", "0950",
+    "0960", "0961",
+]);
+const MARBLE_LINE_COLOR_TERMS = [
+    "GRANITO", "STONE", "UVATUBA", "GALAXIA",
+];
+// Acabados de uso exclusivo en superficies de trabajo. En SAP los colores
+// Blanco Fort y Gris Fort también aparecen como Granito Blanco y Granito Gris.
+const WORK_SURFACE_ONLY_COLOR_CODES = new Set(["0900", "0901", "0904", "0950"]);
+const WORK_SURFACE_ONLY_COLOR_TERMS = [
+    "GRANITO PERLA", "GRANO PERLA", "BLANCO FORT", "GRIS FORT",
+    "GRANITO CHAMPANA", "GRANO CHAMPANA",
+    "GRANITO BLANCO", "GRANITO GRIS",
+];
 // Respaldo para nombres futuros que todavía no tengan un código catalogado.
 const MATERIAL_COLOR_TERMS = [
     "BLANCO FORT",
@@ -40,12 +58,36 @@ const MATERIAL_COLOR_TERMS = [
     "VERDE PRIMAVERA FV",
     "CARIBE SHELL",
 ];
+// Acabados que SAP puede listar, pero que no son fabricables en productos de
+// mármol o fibra de vidrio.
+const MATERIAL_FORBIDDEN_COLOR_TERMS = ["GRIS SOMBRA"];
+const MATERIAL_FORBIDDEN_COLOR_CODES = new Set(["0503"]);
 const normalizeCatalogText = (value: unknown) =>
     String(value ?? "")
         .toUpperCase()
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .trim();
+
+const isInactiveSapItem = (item: any) =>
+    item?.isActive === false || normalizeCatalogText(item?.STATUS) === "INACTIVO";
+
+
+const validateKitItem = async (item: any) => {
+    const response = await fetch(`/api/sap/skus?exact=${encodeURIComponent(item.SKU)}&limit=1&validateKit=true`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "No fue posible validar la LDM del artículo.");
+
+    const validatedItem = payload.data?.[0];
+    if (!validatedItem?.hasProductTree) {
+        throw new Error(`El SKU ${item.SKU} no tiene una LDM válida en SAP y no puede utilizarse para crear kits.`);
+    }
+    if (validatedItem.isSpa && !validatedItem.isMultipersonal) {
+        throw new Error(`El SKU ${item.SKU} es una referencia SPA cuya LDM no contiene un equipo MULTIPERSONAL. No puede utilizarse para crear kits.`);
+    }
+
+    return { ...item, ...validatedItem };
+};
 
 const MATERIAL_PRODUCT_TERMS = [
     "MARMOL",
@@ -93,14 +135,31 @@ const FURNITURE_PRODUCT_TERMS = [
     "CARB ",
     "HRJ ",
 ];
+const FIBERGLASS_BATH_SKU_PREFIXES = ["VHEM", "VHPT", "VTIN"];
+const FIBERGLASS_BATH_PRODUCT_TERMS = [
+    "HIDROAERO", "HIDROMASAJE", "TINA", "BANERA",
+];
+const WORK_SURFACE_PRODUCT_TERMS = [
+    "MESON", "MESONES", "BARRA", "BARRAS",
+    "MESA DE TRABAJO", "MESAS DE TRABAJO", "LAVAPLATOS",
+];
 
 const matchesProductPrefix = (sku: string, prefixes: string[]) => {
     const comparableSku = sku.startsWith("C") ? `V${sku.slice(1)}` : sku;
     return prefixes.some(prefix => comparableSku.startsWith(prefix));
 };
+const isItemGroupSelection = (item: any) =>
+    item?.GROUP_CODE !== undefined || item?.GROUP_NAME !== undefined;
+
 const isMaterialProduct = (item: any) => {
     const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
-    const description = normalizeCatalogText(item?.DESCRIPCION ?? item?.ItemName);
+    const description = normalizeCatalogText(item?.GROUP_NAME ?? item?.DESCRIPCION ?? item?.ItemName);
+
+    // En creación desde cero se selecciona un grupo SAP, no un SKU. En ese caso
+    // la clasificación se obtiene directamente del nombre del grupo.
+    if (isItemGroupSelection(item)) {
+        return MATERIAL_PRODUCT_TERMS.some(term => description.includes(term));
+    }
 
     // La familia SAP es la fuente principal. Esto permite reconocer correctamente
     // kits que incluyen la palabra "mueble" pero cuyo color corresponde a la superficie.
@@ -116,11 +175,33 @@ const isFurnitureProduct = (item: any) => {
     if (!item || isMaterialProduct(item)) return false;
 
     const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
-    const description = normalizeCatalogText(item?.DESCRIPCION ?? item?.ItemName);
+    const description = normalizeCatalogText(item?.GROUP_NAME ?? item?.DESCRIPCION ?? item?.ItemName);
+
+    if (isItemGroupSelection(item)) {
+        return FURNITURE_PRODUCT_TERMS.some(term => description.includes(term));
+    }
 
     if (matchesProductPrefix(sku, FURNITURE_PRODUCT_SKU_PREFIXES)) return true;
     if (!sku.startsWith("V")) return false;
     return FURNITURE_PRODUCT_TERMS.some(term => description.includes(term));
+};
+const isFiberglassBathProduct = (item: any) => {
+    if (!item) return false;
+
+    const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
+    const description = normalizeCatalogText(item?.GROUP_NAME ?? item?.DESCRIPCION ?? item?.ItemName);
+    return matchesProductPrefix(sku, FIBERGLASS_BATH_SKU_PREFIXES) ||
+        FIBERGLASS_BATH_PRODUCT_TERMS.some(term =>
+            new RegExp(`(^|[^A-Z0-9])${term}([^A-Z0-9]|$)`).test(description)
+        );
+};
+const isWorkSurfaceProduct = (item: any) => {
+    if (!item) return false;
+
+    const description = normalizeCatalogText(item?.GROUP_NAME ?? item?.DESCRIPCION ?? item?.ItemName);
+    return WORK_SURFACE_PRODUCT_TERMS.some(term =>
+        new RegExp(`(^|[^A-Z0-9])${term}([^A-Z0-9]|$)`).test(description)
+    );
 };
 const getNormalizedColor = (item: any) => {
     const code = normalizeCatalogText(item?.CodigoColor ?? item?.Code);
@@ -139,21 +220,67 @@ const isFurnitureForbiddenColor = (item: any) => {
     return MATERIAL_ONLY_COLOR_CODES.has(code) || MATERIAL_COLOR_TERMS.some(term => text.includes(term));
 };
 
+const isMarbleLineColor = (item: any) => {
+    const { code, text } = getNormalizedColor(item);
+    return MARBLE_LINE_COLOR_CODES.has(code) ||
+        MARBLE_LINE_COLOR_TERMS.some(term => text.includes(term));
+};
+
+const isWorkSurfaceOnlyColor = (item: any) => {
+    const { code, text } = getNormalizedColor(item);
+    return WORK_SURFACE_ONLY_COLOR_CODES.has(code) ||
+        WORK_SURFACE_ONLY_COLOR_TERMS.some(term => text.includes(term));
+};
+
+const getWorkSurfaceOnlyColorRestriction = (sku: any, color: any) => {
+    if (!sku || !color || !isWorkSurfaceOnlyColor(color) || isWorkSurfaceProduct(sku)) return null;
+
+    const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "producto seleccionado";
+    const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    return `El producto ${productName} no puede crearse con el color "${colorName}". Grano Perla, Blanco Fort, Gris Fort y Grano Champaña son acabados exclusivos para mesones, barras, mesas de trabajo y lavaplatos de mármol sintético.`;
+};
+
+const getSyntheticMarbleWorkSurfaceColorRestriction = (sku: any, color: any) => {
+    if (!sku || !color || !isMaterialProduct(sku) || !isWorkSurfaceProduct(sku)) return null;
+    if (isWorkSurfaceOnlyColor(color)) return null;
+
+    const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "producto seleccionado";
+    const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    return `El producto de mármol sintético ${productName} no puede crearse con el color "${colorName}". Los mesones, barras, mesas de trabajo y lavaplatos de mármol sintético deben usar Blanco Fort, Gris Fort, Grano Perla o Grano Champaña; no se permiten colores planos como blanco o natural.`;
+};
+
+const getFiberglassBathMarbleColorRestriction = (sku: any, color: any) => {
+    if (!sku || !color || !isFiberglassBathProduct(sku) || !isMarbleLineColor(color)) return null;
+
+    const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "producto seleccionado";
+    const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    return `El producto ${productName} no puede crearse con el color de línea mármol "${colorName}". Los hidroaeros, hidromasajes, tinas y sus kits solo pueden fabricarse con acabados compatibles de fibra de vidrio.`;
+};
+
 const getFurnitureColorRestriction = (sku: any, color: any) => {
     if (!sku || !color) return null;
     if (!isFurnitureProduct(sku) || !isFurnitureForbiddenColor(color)) return null;
 
-    const skuCode = sku?.SKU ?? sku?.ItemCode ?? "mueble seleccionado";
+    const skuCode = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "mueble seleccionado";
     const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
     return `El mueble ${skuCode} no puede crearse con el color "${colorName}" porque es un acabado exclusivo de mármol o fibra de vidrio. Selecciona un color disponible para muebles.`;
 };
 
 const getMaterialProductColorRestriction = (sku: any, color: any) => {
     if (!sku || !color) return null;
-    if (!isMaterialProduct(sku) || isAllowedMaterialColor(color)) return null;
+    if (!isMaterialProduct(sku)) return null;
 
-    const skuCode = sku?.SKU ?? sku?.ItemCode ?? "seleccionado";
+    const skuCode = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "seleccionado";
     const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    const { code: normalizedColorCode, text: normalizedColor } = getNormalizedColor(color);
+    if (
+        MATERIAL_FORBIDDEN_COLOR_CODES.has(normalizedColorCode) ||
+        MATERIAL_FORBIDDEN_COLOR_TERMS.some(term => normalizedColor.includes(term))
+    ) {
+        return `El producto ${skuCode} no puede crearse en el color "${colorName}" porque GRIS SOMBRA no se fabrica en productos de mármol o fibra de vidrio. Selecciona otro acabado.`;
+    }
+    if (isAllowedMaterialColor(color)) return null;
+
     return `El producto ${skuCode} no puede crearse con el color de mueble "${colorName}". Para productos de mármol o fibra de vidrio, selecciona un acabado compatible con su material.`;
 };
 const MATERIAL_ONLY_VERSION_TERMS = ["PERF", "PERFORACION"];
@@ -171,9 +298,18 @@ const getFurnitureVersionRestriction = (sku: any, version: any) => {
 };
 
 const getProductConfigurationRestriction = (sku: any, color: any, version?: any) =>
+    getSyntheticMarbleWorkSurfaceColorRestriction(sku, color) ||
+    getWorkSurfaceOnlyColorRestriction(sku, color) ||
+    getFiberglassBathMarbleColorRestriction(sku, color) ||
     getFurnitureColorRestriction(sku, color) ||
     getMaterialProductColorRestriction(sku, color) ||
     getFurnitureVersionRestriction(sku, version);
+const getProductColorRestriction = (sku: any, color: any) =>
+    getSyntheticMarbleWorkSurfaceColorRestriction(sku, color) ||
+    getWorkSurfaceOnlyColorRestriction(sku, color) ||
+    getFiberglassBathMarbleColorRestriction(sku, color) ||
+    getFurnitureColorRestriction(sku, color) ||
+    getMaterialProductColorRestriction(sku, color);
 const buildConfiguredSku = (sku: any, color: any, version?: any) => {
     const skuCode = normalizeCatalogText(sku?.SKU ?? sku?.ItemCode);
     const colorCode = normalizeCatalogText(color?.CodigoColor ?? color?.Code);
@@ -273,7 +409,7 @@ export default function CreacionPage() {
 
     // Cache cliente: almacena resultados recientes para mostrarlos instantáneamente
     // Clave: "field:query" -> { data, hasMore, ts }
-    const searchCacheRef = useRef<Map<string, { data: any[], hasMore: boolean, ts: number }>>(new Map());
+    const searchCacheRef = useRef<Map<string, { data: any[], hasMore: boolean, nextOffset?: number, ts: number }>>(new Map());
     const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
 
     // Connection Check & Table Detection
@@ -324,12 +460,18 @@ export default function CreacionPage() {
             else if (field === "version" && (selectedVersion?.Version !== value && selectedVersion?.CodigoVersion !== value)) setSelectedVersion(null);
         }
 
-        const BATCH_SIZE = 200;
+        // Una primera página más pequeña responde más rápido; el resto continúa
+        // cargándose con la paginación al desplazarse por la lista.
+        const BATCH_SIZE = field === "sku" || field === "kit_sku" ? 60 : 100;
         if (!isAppending) offsetRef.current[field] = 0;
         const offset = offsetRef.current[field];
 
         // ─── CACHE CLIENTE: mostrar resultados instantáneos si ya fueron buscados ───
-        const catalogType = field === "sku" && selectedAction === "de_cero" ? "item-groups" : field;
+        const catalogType = field === "sku" && selectedAction === "de_cero"
+            ? "item-groups"
+            : (field === "sku" && selectedAction === "estructura") || field === "kit_sku"
+                ? `${field}-ventas-v2`
+                : field;
         const cacheKey = `${catalogType}:${value.trim().toUpperCase()}:${offset}`;
         if (!isAppending) {
             const cached = searchCacheRef.current.get(cacheKey);
@@ -344,7 +486,7 @@ export default function CreacionPage() {
                 else if (field === "version") setVersionResults(updateList);
                 else if (field === "kit_sku") setKitResults(updateList);
                 setHasMore(prev => ({ ...prev, [field]: cached.hasMore }));
-                offsetRef.current[field] = cached.data.length;
+                offsetRef.current[field] = cached.nextOffset ?? cached.data.length;
                 fetchingRef.current[field] = false;
                 return; // No hacer fetch si el caché es reciente
             }
@@ -372,8 +514,12 @@ export default function CreacionPage() {
                 displayCodeCol = "CodigoVersion";
             }
 
-            const kitFilters = field === "kit_sku" ? "&salesOnly=true&vOnly=true&kitComponents=true" : "";
-            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${kitFilters}`;
+            const skuFilters = field === "kit_sku"
+                ? "&salesOnly=true&vOnly=true&kitComponents=true"
+                : field === "sku" && selectedAction === "estructura"
+                    ? "&vOnly=true"
+                    : "";
+            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}`;
             const res = await fetch(url, {
                 signal: currentController?.signal
             });
@@ -384,9 +530,17 @@ export default function CreacionPage() {
             }
 
             const resData = await res.json();
-            const newData: any[] = resData.data || [];
+            const rawData: any[] = resData.data || [];
+            // Defensa adicional en el cliente: en referencias y componentes de kit
+            // nunca se muestran códigos C (compras), aunque SAP o un caché antiguo
+            // llegaran a devolverlos.
+            const onlySalesCodes =
+                (field === "sku" && selectedAction === "estructura") || field === "kit_sku";
+            const newData = onlySalesCodes
+                ? rawData.filter(item => normalizeCatalogText(item?.SKU).startsWith("V"))
+                : rawData;
 
-            offsetRef.current[field] += newData.length;
+            offsetRef.current[field] += rawData.length;
             setHasMore(prev => ({ ...prev, [field]: resData.hasMore }));
 
             const displayCol = displayCodeCol;
@@ -408,7 +562,7 @@ export default function CreacionPage() {
                     const oldestKey = searchCacheRef.current.keys().next().value;
                     if (oldestKey) searchCacheRef.current.delete(oldestKey);
                 }
-                searchCacheRef.current.set(cacheKey, { data: newData, hasMore: resData.hasMore, ts: Date.now() });
+                searchCacheRef.current.set(cacheKey, { data: newData, hasMore: resData.hasMore, nextOffset: rawData.length, ts: Date.now() });
             }
 
         } catch (err: any) {
@@ -435,10 +589,32 @@ export default function CreacionPage() {
                         activeField === "kit_sku" ? kitInput : versionInput;
             // En el selector de grupos, limpiar el texto vuelve a cargar la lista completa.
             const isGroupSelector = activeField === "sku" && selectedAction === "de_cero";
-            if (!isGroupSelector && val.trim().length === 0) return;
+            const clearCurrentSearch = () => {
+                abortControllersRef.current[activeField]?.abort();
+                abortControllersRef.current[activeField] = null;
+                fetchingRef.current[activeField] = false;
+                offsetRef.current[activeField] = 0;
+                if (activeField === "sku") { setSkuResults([]); setSelectedSku(null); }
+                else if (activeField === "color") { setColorResults([]); setSelectedColor(null); }
+                else if (activeField === "version") { setVersionResults([]); setSelectedVersion(null); }
+                else if (activeField === "kit_sku") setKitResults([]);
+                setLoading(prev => ({ ...prev, [activeField]: false }));
+                setLoadingMore(prev => ({ ...prev, [activeField]: false }));
+                setHasMore(prev => ({ ...prev, [activeField]: true }));
+            };
+            if (!isGroupSelector && val.trim().length === 0) {
+                clearCurrentSearch();
+                return;
+            }
+            // Las búsquedas de una sola letra obligan a SAP a recorrer casi todo
+            // el catálogo y normalmente se reemplazan enseguida al seguir escribiendo.
+            if (!isGroupSelector && val.trim().length === 1) {
+                clearCurrentSearch();
+                return;
+            }
             const timer = setTimeout(() => {
                 performSearch(activeField, val);
-            }, 150);
+            }, 400);
             return () => clearTimeout(timer);
         }
     }, [skuInput, colorInput, kitInput, versionInput, activeField, selectedAction, performSearch]);
@@ -469,10 +645,12 @@ export default function CreacionPage() {
     // Revalida las restricciones aunque la selección ya existiera o se haya
     // realizado en un orden diferente (SKU antes/después del color).
     useEffect(() => {
-        if (selectedAction !== "estructura") return;
+        if (selectedAction !== "estructura" && selectedAction !== "de_cero") return;
         if (!selectedSku || !selectedColor) return;
 
-        const restriction = getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion);
+        const restriction = selectedAction === "estructura"
+            ? getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion)
+            : getProductColorRestriction(selectedSku, selectedColor);
 
         if (restriction) setDetailedError(restriction);
     }, [selectedAction, selectedSku, selectedColor, selectedVersion]);
@@ -511,7 +689,9 @@ export default function CreacionPage() {
 
         const configurationRestriction = selectedAction === "estructura"
             ? getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion)
-            : null;
+            : selectedAction === "de_cero"
+                ? getProductColorRestriction(selectedSku, selectedColor)
+                : null;
         if (configurationRestriction) {
             setDetailedError(configurationRestriction);
             alert(configurationRestriction);
@@ -546,6 +726,29 @@ export default function CreacionPage() {
         }
 
         if (selectedAction === "kit") {
+            const inactiveKitItems = kitSelectedItems.filter(isInactiveSapItem);
+            if (inactiveKitItems.length > 0) {
+                const inactiveCodes = inactiveKitItems.map(item => item.SKU).filter(Boolean).join(", ");
+                const error = `No puedes crear el kit porque contiene artículos inactivos: ${inactiveCodes}. Elimina los artículos inactivos y selecciona referencias activas.`;
+                setKitCompatError(error);
+                alert(error);
+                return;
+            }
+
+            if (kitSelectedItems.length > 0) {
+                setIsCheckingDuplicate(true);
+                try {
+                    await Promise.all(kitSelectedItems.map(validateKitItem));
+                } catch (error: any) {
+                    const message = error.message || "Un artículo del kit no tiene una LDM válida.";
+                    setKitCompatError(message);
+                    alert(message);
+                    return;
+                } finally {
+                    setIsCheckingDuplicate(false);
+                }
+            }
+
             const compositionError = getCompleteKitRestriction(kitSelectedItems);
             const error = !kitName.trim()
                 ? "Debes escribir el nombre del kit antes de finalizar."
@@ -576,14 +779,25 @@ export default function CreacionPage() {
             if (error) throw error;
 
             setSubmitSuccess(true);
+            // Deja el formulario completamente vacío apenas la solicitud queda
+            // guardada, evitando que una nueva solicitud herede selecciones previas.
+            Object.values(abortControllersRef.current).forEach(controller => controller?.abort());
+            abortControllersRef.current = { sku: null, color: null, version: null, kit_sku: null };
+            fetchingRef.current = { sku: false, color: false, version: false, kit_sku: false };
+            offsetRef.current = { sku: 0, color: 0, version: 0, kit_sku: 0 };
+            setActiveField(null);
+            setSkuInput(""); setSelectedSku(null); setSkuResults([]);
+            setColorInput(""); setSelectedColor(null); setColorResults([]);
+            setVersionInput(""); setSelectedVersion(null); setVersionResults([]);
+            setKitInput(""); setKitResults([]); setKitSelectedItems([]); setKitName(""); setKitAdditional("");
+            setComentarios("");
+            setDetailedError(null); setKitCompatError(null);
+            setHasMore({ sku: true, color: true, version: true, kit_sku: true });
+            setLoading({ sku: false, color: false, version: false, kit_sku: false });
+            setLoadingMore({ sku: false, color: false, version: false, kit_sku: false });
             setTimeout(() => {
                 setSubmitSuccess(false);
                 setSelectedAction(null);
-                setSkuInput(""); setSelectedSku(null);
-                setColorInput(""); setSelectedColor(null);
-                setVersionInput(""); setSelectedVersion(null);
-                setKitInput(""); setKitSelectedItems([]); setKitName(""); setKitAdditional("");
-                setComentarios("");
             }, 2000);
         } catch (err: any) {
             console.error("Error al crear solicitud:", err);
@@ -594,9 +808,25 @@ export default function CreacionPage() {
     };
 
         const handleSelect = async (field: ActiveField, item: any) => {
-            if ((field === "sku" || field === "kit_sku") && item.STATUS === 'INACTIVO') {
-                setDetailedError('Este SKU está inactivo y no puede seleccionarse.');
-                setTimeout(() => setDetailedError(null), 5000);
+            const requiresSalesCode =
+                (field === "sku" && selectedAction === "estructura") || field === "kit_sku";
+            if (requiresSalesCode && !normalizeCatalogText(item?.SKU).startsWith("V")) {
+                const error = `El código ${item?.SKU || "seleccionado"} es de compra. En este módulo solo se permiten SKU de venta que comiencen por V.`;
+                if (field === "kit_sku") setKitCompatError(error);
+                else setDetailedError(error);
+                if (field === "sku") setSkuResults([]);
+                else setKitResults([]);
+                return;
+            }
+            if ((field === "sku" || field === "kit_sku") && isInactiveSapItem(item)) {
+                const error = `El SKU ${item.SKU || "seleccionado"} está INACTIVO en SAP y no puede agregarse al kit.`;
+                if (field === "kit_sku") {
+                    setKitCompatError(error);
+                    setTimeout(() => setKitCompatError(null), 7000);
+                } else {
+                    setDetailedError(error);
+                    setTimeout(() => setDetailedError(null), 7000);
+                }
                 return;
             }
 
@@ -606,7 +836,9 @@ export default function CreacionPage() {
             const configurationRestriction =
                 selectedAction === "estructura" && (field === "sku" || field === "color" || field === "version")
                     ? getProductConfigurationRestriction(candidateSku, candidateColor, candidateVersion)
-                    : null;
+                    : selectedAction === "de_cero" && (field === "sku" || field === "color")
+                        ? getProductColorRestriction(candidateSku, candidateColor)
+                        : null;
 
             if (configurationRestriction) {
                 setDetailedError(configurationRestriction);
@@ -646,8 +878,21 @@ export default function CreacionPage() {
                     setTimeout(() => setKitCompatError(null), 6000);
                     return;
                 }
+                let validatedKitItem = item;
+                setIsCheckingDuplicate(true);
+                try {
+                    validatedKitItem = await validateKitItem(item);
+                } catch (error: any) {
+                    const message = error.message || "El artículo no tiene una LDM válida para crear kits.";
+                    setKitCompatError(message);
+                    setTimeout(() => setKitCompatError(null), 8000);
+                    return;
+                } finally {
+                    setIsCheckingDuplicate(false);
+                }
+
                 // Prevent duplicates
-                if (kitSelectedItems.some(i => i.SKU === item.SKU)) {
+                if (kitSelectedItems.some(i => i.SKU === validatedKitItem.SKU)) {
                     setKitInput("");
                     setKitResults([]);
                     setActiveField(null);
@@ -655,14 +900,14 @@ export default function CreacionPage() {
                 }
 
                 // Check compatibility rules based on Firplak Catalog
-                const compatibilityError = validateKitCandidate(item, kitSelectedItems);
+                const compatibilityError = validateKitCandidate(validatedKitItem, kitSelectedItems);
                 if (compatibilityError) {
                     setKitCompatError(compatibilityError);
                     setTimeout(() => setKitCompatError(null), 6000);
                     return; // Stop adding if incompatible
                 }
 
-                const nextKitItems = [...kitSelectedItems, item];
+                const nextKitItems = [...kitSelectedItems, validatedKitItem];
                 if (nextKitItems.length === 2) {
                     const pairError = getCompleteKitRestriction(nextKitItems);
                     if (pairError) {
@@ -688,9 +933,14 @@ export default function CreacionPage() {
         };
 
         const renderSearchDropdown = ({ field, results, isLoading, isMoreLoading }: { field: ActiveField, results: any[], isLoading: boolean, isMoreLoading: boolean }) => {
-            if (results.length === 0 && !isLoading) return null;
-
             const isGroupSearch = field === "sku" && selectedAction === "de_cero";
+            const requiresSalesCode =
+                (field === "sku" && selectedAction === "estructura") || field === "kit_sku";
+            const visibleResults = requiresSalesCode
+                ? results.filter(item => normalizeCatalogText(item?.SKU).startsWith("V"))
+                : results;
+            if (visibleResults.length === 0 && !isLoading) return null;
+
             const h1 = isGroupSearch ? "CÓDIGO" : (field === "sku" || field === "kit_sku") ? "NRO. ARTÍCULO" : field === "color" ? "CÓDIGO COLOR" : "CÓDIGO VERSIÓN";
             const h2 = isGroupSearch ? "GRUPO DE ARTÍCULOS" : (field === "sku" || field === "kit_sku") ? "DESCRIPCIÓN SAP" : field === "color" ? "DESCRIPCIÓN COLOR" : "DESCRIPCIÓN VERSIÓN";
 
@@ -731,13 +981,13 @@ export default function CreacionPage() {
                                     <span className="text-[0.7rem] font-bold uppercase tracking-[0.6em] text-[#3499CD]/40">Sincronizando Catálogo...</span>
                                 </div>
                             </div>
-                        ) : results.length === 0 ? (
+                        ) : visibleResults.length === 0 ? (
                             <div className="py-16 text-center">
                                 <span className="text-[0.75rem] font-bold uppercase tracking-widest text-slate-300">Sin resultados para tu búsqueda</span>
                             </div>
                         ) : (
                             <>
-                                {results.map((item, idx) => {
+                                {visibleResults.map((item, idx) => {
                                     const stableKey =
                                         field === 'sku' || field === 'kit_sku' ? item.SKU :
                                         field === 'color' ? item.CodigoColor :
@@ -780,7 +1030,7 @@ export default function CreacionPage() {
                                     </div>
                                 )}
 
-                                {!isMoreLoading && hasMore[field as string] && results.length > 0 && (
+                                {!isMoreLoading && hasMore[field as string] && visibleResults.length > 0 && (
                                     <button
                                         type="button"
                                         onClick={() => {
@@ -984,6 +1234,9 @@ export default function CreacionPage() {
 
                                     <div className="relative space-y-4" ref={versionRef}>
                                         <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Versión</label>
+                                        <p className="mx-2 rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083]">
+                                            <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
+                                        </p>
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1057,7 +1310,17 @@ export default function CreacionPage() {
                                         {kitSelectedItems.map((item, i) => (
                                             <div key={i} className="flex items-center justify-between p-6 bg-[#F8FAFC] rounded-2xl border-l-[6px] border-l-[#0F364B] border-y border-r border-slate-100 group hover:shadow-md transition-all animate-in zoom-in slide-in-from-right-4 duration-300">
                                                 <div className="flex flex-col">
-                                                    <span className="text-[#0F364B] font-black text-lg tracking-tight leading-none mb-1">{item.SKU}</span>
+                                                    <div className="flex items-center gap-3 mb-1">
+                                                        <span className="text-[#0F364B] font-black text-lg tracking-tight leading-none">{item.SKU}</span>
+                                                        <span className={`rounded-full px-2.5 py-1 text-[0.6rem] font-black uppercase ${isInactiveSapItem(item) ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                                            {isInactiveSapItem(item) ? "INACTIVO" : "ACTIVO"}
+                                                        </span>
+                                                        {item.isSpa && item.isMultipersonal && (
+                                                            <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[0.6rem] font-black uppercase text-sky-700">
+                                                                SPA MULTIPERSONAL
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     <span className="text-slate-500 font-bold uppercase text-[0.75rem] leading-tight">{item.DESCRIPCION}</span>
                                                 </div>
                                                 <button
@@ -1153,6 +1416,9 @@ export default function CreacionPage() {
                                     {/* Version */}
                                     <div className="relative space-y-4" ref={versionRef}>
                                         <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Versión</label>
+                                        <p className="mx-2 rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083]">
+                                            <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
+                                        </p>
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
