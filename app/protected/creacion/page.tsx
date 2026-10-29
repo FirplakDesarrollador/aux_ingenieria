@@ -1215,7 +1215,7 @@ export default function CreacionPage() {
                             <div className="space-y-10 animate-in slide-in-from-bottom-8 duration-500">
                                 {/* Row 1: SKU (Full Width) */}
                                 <div className="relative space-y-4" ref={skuRef}>
-                                    <FieldHelp label="Buscar Código de Referencia" help="Escribe un SKU de venta que comience por V o una palabra de la descripción, por ejemplo VHEM06 o GALÁPAGOS." />
+                                    <FieldHelp label="Buscar Código de Referencia" help="Escribe un SKU de venta que comience por V, por ejemplo VBAN05-0001-000-0100, o busca una palabra de la descripción, como MUEBLE." />
                                     <div className={`relative transition-all duration-700 ${activeField === 'sku' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                         <input
                                             type="text"
