@@ -556,8 +556,8 @@ export default function CreacionPage() {
                 : "";
             const versionContext = field === "version"
                 ? selectedAction === "de_cero"
-                    ? `&groupCode=${encodeURIComponent(String(selectedSku?.GROUP_CODE ?? selectedSku?.SKU ?? ""))}`
-                    : `&sku=${encodeURIComponent(selectedSku?.SKU ?? "")}`
+                    ? `&groupCode=${encodeURIComponent(String(selectedSku?.GROUP_CODE ?? selectedSku?.SKU ?? ""))}&productName=${encodeURIComponent(selectedSku?.GROUP_NAME ?? selectedSku?.DESCRIPCION ?? "")}`
+                    : `&sku=${encodeURIComponent(selectedSku?.SKU ?? "")}&productName=${encodeURIComponent(selectedSku?.DESCRIPCION ?? "")}`
                 : "";
             const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}${serverSort}${versionContext}`;
             const res = await fetch(url, {

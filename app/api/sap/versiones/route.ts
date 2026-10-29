@@ -36,6 +36,16 @@ const FURNITURE_AND_KITCHEN_PREFIXES = new Set([
     "VCOC01", "VCOC02", "VCOC03", "VCOC08", "VCOC09", "VCLO01",
     "VROP03", "VROP07", "VROP10", "VROP11", "VROP12", "VOUT03",
 ]);
+const FURNITURE_GROUP_TERMS = ["MUEBLE", "MBLE", "ALACENA", "GABINETE", "CLOSET", "TABLERO", "FRENTE"];
+const MATERIAL_VERSION_FILTER = [
+    "startswith(ItemCode,'VHEM')",
+    "startswith(ItemCode,'VHPT')",
+    "startswith(ItemCode,'VTIN')",
+    "startswith(ItemCode,'VCOC04-')",
+    "startswith(ItemCode,'VCOC05-')",
+    "startswith(ItemCode,'VCOC07-')",
+    "startswith(ItemCode,'VBAN29-')",
+].join(" or ");
 
 const normalizeText = (value: unknown) =>
     String(value ?? "")
@@ -54,11 +64,7 @@ const getVersionCode = (itemCode: string) => {
     return segments.length >= 4 ? segments.at(-2) ?? "" : "";
 };
 
-const loadVersionsFromExistingItems = async (contextKey: string, sapFilter: string) => {
-    const cacheKey = `versions-context:${contextKey}`;
-    const cached = getCachedSearch<ContextVersion[]>(cacheKey);
-    if (cached) return cached;
-
+const fetchItemsByFilter = async (sapFilter: string) => {
     const items: SapItem[] = [];
     let sapOffset = 0;
     const sapPageSize = 1000;
@@ -80,10 +86,37 @@ const loadVersionsFromExistingItems = async (contextKey: string, sapFilter: stri
         if (!hasNextPage || page.length === 0) break;
     }
 
+    return items;
+};
+
+const loadMaterialVersionCodes = async () => {
+    const cacheKey = "versions-material-restrictions:v1";
+    const cached = getCachedSearch<string[]>(cacheKey);
+    if (cached) return cached;
+
+    const items = await fetchItemsByFilter(`SalesItem eq 'tYES' and (${MATERIAL_VERSION_FILTER})`);
+    const codes = [...new Set(items
+        .map(item => getVersionCode(item.ItemCode || ""))
+        .filter(code => code && code !== "000"))];
+    setCachedSearch(cacheKey, codes);
+    return codes;
+};
+
+const loadVersionsFromExistingItems = async (contextKey: string, sapFilter: string, excludeMaterialVersions: boolean) => {
+    const cacheKey = `versions-context:v2:${contextKey}:${excludeMaterialVersions ? "without-material" : "all"}`;
+    const cached = getCachedSearch<ContextVersion[]>(cacheKey);
+    if (cached) return cached;
+
+    const [items, restrictedCodes] = await Promise.all([
+        fetchItemsByFilter(sapFilter),
+        excludeMaterialVersions ? loadMaterialVersionCodes() : Promise.resolve([]),
+    ]);
+    const restrictedVersions = new Set(restrictedCodes);
+
     const versions = new Map<string, { sample: string; count: number }>();
     for (const item of items) {
         const code = getVersionCode(item.ItemCode || "");
-        if (!code) continue;
+        if (!code || restrictedVersions.has(code)) continue;
 
         const current = versions.get(code);
         if (current) {
@@ -120,10 +153,12 @@ export async function GET(request: Request) {
     const limit = Math.min(200, Math.max(1, parseInt(searchParams.get("limit") || "100", 10) || 100));
     const referenceBase = getReferenceBase(searchParams.get("sku") || "");
     const groupCode = Number.parseInt(searchParams.get("groupCode") || "", 10);
+    const contextName = normalizeText(searchParams.get("productName"));
 
     try {
         let contextKey = "";
         let sapFilter = "";
+        let excludeMaterialVersions = false;
 
         if (referenceBase) {
             const escapedBase = referenceBase.replace(/'/g, "''");
@@ -131,6 +166,7 @@ export async function GET(request: Request) {
             if (FURNITURE_AND_KITCHEN_PREFIXES.has(skuPrefix)) {
                 contextKey = `SKU-FAMILY:${skuPrefix}`;
                 sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'${skuPrefix}-')`;
+                excludeMaterialVersions = true;
             } else {
                 contextKey = `SKU:${referenceBase}`;
                 sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'${escapedBase}-')`;
@@ -138,6 +174,7 @@ export async function GET(request: Request) {
         } else if (Number.isFinite(groupCode)) {
             contextKey = `GROUP:${groupCode}`;
             sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'V') and ItemsGroupCode eq ${groupCode}`;
+            excludeMaterialVersions = FURNITURE_GROUP_TERMS.some(term => contextName.includes(term));
         } else {
             return NextResponse.json({
                 data: [],
@@ -146,7 +183,7 @@ export async function GET(request: Request) {
             }, { status: 400 });
         }
 
-        const contextualVersions = await loadVersionsFromExistingItems(contextKey, sapFilter);
+        const contextualVersions = await loadVersionsFromExistingItems(contextKey, sapFilter, excludeMaterialVersions);
         const filteredVersions = search
             ? contextualVersions.filter(version =>
                 normalizeText(`${version.CodigoVersion} ${version.Version} ${version.EjemploSAP}`).includes(search)
