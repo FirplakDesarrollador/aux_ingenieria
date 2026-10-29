@@ -6,6 +6,8 @@ import { createClient } from "@/lib/supabase/client";
 import { getCompleteKitRestriction, suggestKitName, validateKitCandidate } from "@/lib/kit-mix-match";
 
 type ActiveField = "sku" | "color" | "version" | "kit_sku" | null;
+type SortColumn = "code" | "description";
+type SortConfig = { field: Exclude<ActiveField, null>; column: SortColumn; direction: "asc" | "desc" } | null;
 
 const FieldHelp = ({ label, help, large = false }: { label: string; help: string; large?: boolean }) => (
     <div className="group/field-help relative ml-2 flex w-fit items-center gap-2">
@@ -407,6 +409,7 @@ export default function CreacionPage() {
     const [activeField, setActiveField] = useState<ActiveField>(null);
     const [loading, setLoading] = useState<Record<string, boolean>>({ sku: false, color: false, version: false, kit_sku: false });
     const [loadingMore, setLoadingMore] = useState<Record<string, boolean>>({ sku: false, color: false, version: false, kit_sku: false });
+    const [sortConfig, setSortConfig] = useState<SortConfig>(null);
 
     // Click outside listener refs
     const skuRef = useRef<HTMLDivElement>(null);
@@ -669,6 +672,7 @@ export default function CreacionPage() {
     useEffect(() => {
         setDetailedError(null);
         setKitCompatError(null);
+        setSortConfig(null);
     }, [selectedAction]);
 
     // Close on click outside
@@ -953,6 +957,31 @@ export default function CreacionPage() {
                 : results;
             if (visibleResults.length === 0 && !isLoading) return null;
 
+            const toggleSort = (column: SortColumn) => {
+                if (!field) return;
+                setSortConfig(current => ({
+                    field,
+                    column,
+                    direction: current?.field === field && current.column === column && current.direction === "asc"
+                        ? "desc"
+                        : "asc",
+                }));
+            };
+            const activeSort = field && sortConfig?.field === field ? sortConfig : null;
+            const sortedVisibleResults = activeSort
+                ? [...visibleResults].sort((left, right) => {
+                    const getValue = (item: any) => activeSort.column === "code"
+                        ? (field === "sku" || field === "kit_sku" ? item.SKU : field === "color" ? item.CodigoColor : item.CodigoVersion)
+                        : (field === "sku" || field === "kit_sku" ? item.DESCRIPCION : field === "color" ? item.Color : item.Version);
+                    const comparison = normalizeCatalogText(getValue(left)).localeCompare(
+                        normalizeCatalogText(getValue(right)),
+                        "es",
+                        { numeric: true, sensitivity: "base" },
+                    );
+                    return activeSort.direction === "asc" ? comparison : -comparison;
+                })
+                : visibleResults;
+
             const h1 = isGroupSearch ? "CÓDIGO" : (field === "sku" || field === "kit_sku") ? "NRO. ARTÍCULO" : field === "color" ? "CÓDIGO COLOR" : "CÓDIGO VERSIÓN";
             const h2 = isGroupSearch ? "GRUPO DE ARTÍCULOS" : (field === "sku" || field === "kit_sku") ? "DESCRIPCIÓN SAP" : field === "color" ? "DESCRIPCIÓN COLOR" : "DESCRIPCIÓN VERSIÓN";
 
@@ -977,8 +1006,14 @@ export default function CreacionPage() {
                 <div className={`absolute top-[calc(100%-1.5rem)] left-1/2 -translate-x-1/2 ${field === 'version' ? 'w-auto min-w-[100%]' : field === 'kit_sku' ? 'w-[130%]' : 'w-[150%]'} bg-white rounded-[1.2rem] shadow-[0_25px_60px_rgba(15,23,42,0.18)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300`}>
                     {/* Header Match ScreenShot */}
                     <div className="flex bg-[#eff2f5] border-b border-slate-200 font-black text-[0.65rem] tracking-[0.2em] text-[#324f5f]/60 uppercase italic">
-                        <div className="w-[25%] px-6 py-3.5 border-r border-[#dee2e6]">{h1}</div>
-                        <div className="w-[75%] px-6 py-3.5">{h2}</div>
+                        <button type="button" onDoubleClick={() => toggleSort("code")} title="Doble clic para ordenar A–Z o Z–A" className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
+                            <span>{h1}</span>
+                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{activeSort.direction === "asc" ? "A–Z" : "Z–A"}</span>}
+                        </button>
+                        <button type="button" onDoubleClick={() => toggleSort("description")} title="Doble clic para ordenar A–Z o Z–A" className="flex w-[75%] cursor-pointer items-center justify-between px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
+                            <span>{h2}</span>
+                            {activeSort?.column === "description" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{activeSort.direction === "asc" ? "A–Z" : "Z–A"}</span>}
+                        </button>
                     </div>
 
                     {/* Scrollable Body Container */}
@@ -999,7 +1034,7 @@ export default function CreacionPage() {
                             </div>
                         ) : (
                             <>
-                                {visibleResults.map((item, idx) => {
+                                {sortedVisibleResults.map((item, idx) => {
                                     const stableKey =
                                         field === 'sku' || field === 'kit_sku' ? item.SKU :
                                         field === 'color' ? item.CodigoColor :
