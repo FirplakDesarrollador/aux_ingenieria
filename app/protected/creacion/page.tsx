@@ -158,6 +158,9 @@ const WORK_SURFACE_PRODUCT_TERMS = [
     "MESON", "MESONES", "BARRA", "BARRAS",
     "MESA DE TRABAJO", "MESAS DE TRABAJO", "LAVAPLATOS",
 ];
+const DISHWASHER_BLACK_COLOR_CODES = new Set(["0160"]);
+const DISHWASHER_FORBIDDEN_GRAY_CODES = new Set(["0501", "0503"]);
+const DISHWASHER_FORBIDDEN_GRAY_TERMS = ["GRIS BRUMA", "GRIS SOMBRA"];
 
 const matchesProductPrefix = (sku: string, prefixes: string[]) => {
     const comparableSku = sku.startsWith("C") ? `V${sku.slice(1)}` : sku;
@@ -218,6 +221,11 @@ const isWorkSurfaceProduct = (item: any) => {
         new RegExp(`(^|[^A-Z0-9])${term}([^A-Z0-9]|$)`).test(description)
     );
 };
+const isDishwasherProduct = (item: any) => {
+    if (!item) return false;
+    const description = normalizeCatalogText(item?.GROUP_NAME ?? item?.DESCRIPCION ?? item?.ItemName);
+    return /(^|[^A-Z0-9])LAVAPLATOS([^A-Z0-9]|$)/.test(description);
+};
 const getNormalizedColor = (item: any) => {
     const code = normalizeCatalogText(item?.CodigoColor ?? item?.Code);
     const text = normalizeCatalogText(`${code} ${item?.Color ?? item?.Name ?? ""}`);
@@ -247,6 +255,19 @@ const isWorkSurfaceOnlyColor = (item: any) => {
         WORK_SURFACE_ONLY_COLOR_TERMS.some(term => text.includes(term));
 };
 
+const getDishwasherColorRestriction = (sku: any, color: any) => {
+    if (!sku || !color || !isDishwasherProduct(sku)) return null;
+    const { code, text } = getNormalizedColor(color);
+    if (
+        !DISHWASHER_FORBIDDEN_GRAY_CODES.has(code) &&
+        !DISHWASHER_FORBIDDEN_GRAY_TERMS.some(term => text.includes(term))
+    ) return null;
+
+    const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "lavaplatos seleccionado";
+    const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    return `El lavaplatos ${productName} no puede crearse con el color "${colorName}". Los colores Gris Bruma (0501) y Gris Sombra (0503) no están permitidos para lavaplatos.`;
+};
+
 const getWorkSurfaceOnlyColorRestriction = (sku: any, color: any) => {
     if (!sku || !color || !isWorkSurfaceOnlyColor(color) || isWorkSurfaceProduct(sku)) return null;
 
@@ -257,10 +278,15 @@ const getWorkSurfaceOnlyColorRestriction = (sku: any, color: any) => {
 
 const getSyntheticMarbleWorkSurfaceColorRestriction = (sku: any, color: any) => {
     if (!sku || !color || !isMaterialProduct(sku) || !isWorkSurfaceProduct(sku)) return null;
+    const { code } = getNormalizedColor(color);
+    if (isDishwasherProduct(sku) && DISHWASHER_BLACK_COLOR_CODES.has(code)) return null;
     if (isWorkSurfaceOnlyColor(color)) return null;
 
     const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "producto seleccionado";
     const colorName = color?.Color ?? color?.Name ?? color?.CodigoColor ?? color?.Code ?? "seleccionado";
+    if (isDishwasherProduct(sku)) {
+        return `El lavaplatos ${productName} no puede crearse con el color "${colorName}". Para lavaplatos se permiten Blanco Fort, Gris Fort, Grano Perla, Grano Champaña o Negro (0160); Gris Bruma y Gris Sombra no están permitidos.`;
+    }
     return `El producto de mármol sintético ${productName} no puede crearse con el color "${colorName}". Los mesones, barras, mesas de trabajo y lavaplatos de mármol sintético deben usar Blanco Fort, Gris Fort, Grano Perla o Grano Champaña; no se permiten colores planos como blanco o natural.`;
 };
 
@@ -322,6 +348,7 @@ const getVersionContextRestriction = (action: string | null, item: any, version:
 };
 
 const getProductConfigurationRestriction = (sku: any, color: any, _version?: any) =>
+    getDishwasherColorRestriction(sku, color) ||
     getSyntheticMarbleWorkSurfaceColorRestriction(sku, color) ||
     getWorkSurfaceOnlyColorRestriction(sku, color) ||
     getFiberglassBathMarbleColorRestriction(sku, color) ||
