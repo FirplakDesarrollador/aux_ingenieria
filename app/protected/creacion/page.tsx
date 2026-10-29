@@ -482,10 +482,13 @@ export default function CreacionPage() {
         const offset = offsetRef.current[field];
 
         // ─── CACHE CLIENTE: mostrar resultados instantáneos si ya fueron buscados ───
+        const activeSortToken = sortConfig?.field === field
+            ? `${sortConfig.column}-${sortConfig.direction}`
+            : "default";
         const catalogType = field === "sku" && selectedAction === "de_cero"
             ? "item-groups"
             : (field === "sku" && selectedAction === "estructura") || field === "kit_sku"
-                ? `${field}-ventas-v2`
+                ? `${field}-ventas-v3-${activeSortToken}`
                 : field;
         const cacheKey = `${catalogType}:${value.trim().toUpperCase()}:${offset}`;
         if (!isAppending) {
@@ -534,7 +537,10 @@ export default function CreacionPage() {
                 : field === "sku" && selectedAction === "estructura"
                     ? "&vOnly=true"
                     : "";
-            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}`;
+            const serverSort = ((field === "sku" && selectedAction === "estructura") || field === "kit_sku") && sortConfig?.field === field
+                ? `&sort=${sortConfig.column === "code" ? "created" : "description"}&direction=${sortConfig.direction}`
+                : "";
+            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}${serverSort}`;
             const res = await fetch(url, {
                 signal: currentController?.signal
             });
@@ -594,7 +600,7 @@ export default function CreacionPage() {
                 else setLoading(prev => ({ ...prev, [field]: false }));
             }
         }
-    }, [selectedSku, selectedColor, selectedVersion, selectedAction]);
+    }, [selectedSku, selectedColor, selectedVersion, selectedAction, sortConfig]);
 
     // Consolidated typing effect with concurrency protection (debounce)
     useEffect(() => {
@@ -950,6 +956,7 @@ export default function CreacionPage() {
 
         const renderSearchDropdown = ({ field, results, isLoading, isMoreLoading }: { field: ActiveField, results: any[], isLoading: boolean, isMoreLoading: boolean }) => {
             const isGroupSearch = field === "sku" && selectedAction === "de_cero";
+            const isArticleSearch = (field === "sku" && !isGroupSearch) || field === "kit_sku";
             const requiresSalesCode =
                 (field === "sku" && selectedAction === "estructura") || field === "kit_sku";
             const visibleResults = requiresSalesCode
@@ -971,7 +978,7 @@ export default function CreacionPage() {
             const sortedVisibleResults = activeSort
                 ? [...visibleResults].sort((left, right) => {
                     const getValue = (item: any) => activeSort.column === "code"
-                        ? (field === "sku" || field === "kit_sku" ? item.SKU : field === "color" ? item.CodigoColor : item.CodigoVersion)
+                        ? (isArticleSearch ? `${item.CREATED_DATE || ""} ${item.SKU || ""}` : field === "sku" ? item.SKU : field === "color" ? item.CodigoColor : item.CodigoVersion)
                         : (field === "sku" || field === "kit_sku" ? item.DESCRIPCION : field === "color" ? item.Color : item.Version);
                     const comparison = normalizeCatalogText(getValue(left)).localeCompare(
                         normalizeCatalogText(getValue(right)),
@@ -1006,11 +1013,11 @@ export default function CreacionPage() {
                 <div className={`absolute top-[calc(100%-1.5rem)] left-1/2 -translate-x-1/2 ${field === 'version' ? 'w-auto min-w-[100%]' : field === 'kit_sku' ? 'w-[130%]' : 'w-[150%]'} bg-white rounded-[1.2rem] shadow-[0_25px_60px_rgba(15,23,42,0.18)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300`}>
                     {/* Header Match ScreenShot */}
                     <div className="flex bg-[#eff2f5] border-b border-slate-200 font-black text-[0.65rem] tracking-[0.2em] text-[#324f5f]/60 uppercase italic">
-                        <button type="button" onClick={() => toggleSort("code")} title="Clic para ordenar de menor a mayor o de mayor a menor" className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
+                        <button type="button" onClick={() => toggleSort("code")} title={isArticleSearch ? "Clic para ordenar del primer SKU creado al último o en orden inverso" : "Clic para ordenar de menor a mayor o en orden inverso"} className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
                             <span>{h1}</span>
-                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{activeSort.direction === "asc" ? "MENOR–MAYOR" : "MAYOR–MENOR"}</span>}
+                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{isArticleSearch ? (activeSort.direction === "asc" ? "PRIMERO–ÚLTIMO" : "ÚLTIMO–PRIMERO") : (activeSort.direction === "asc" ? "MENOR–MAYOR" : "MAYOR–MENOR")}</span>}
                         </button>
-                        <button type="button" onDoubleClick={() => toggleSort("description")} title="Doble clic para ordenar A–Z o Z–A" className="flex w-[75%] cursor-pointer items-center justify-between px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
+                        <button type="button" onClick={() => toggleSort("description")} title="Clic para ordenar A–Z o Z–A" className="flex w-[75%] cursor-pointer items-center justify-between px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
                             <span>{h2}</span>
                             {activeSort?.column === "description" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{activeSort.direction === "asc" ? "A–Z" : "Z–A"}</span>}
                         </button>

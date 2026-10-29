@@ -11,6 +11,8 @@ export async function GET(request: Request) {
     const kitComponents = searchParams.get("kitComponents") === "true";
     const exact = (searchParams.get("exact") || "").trim().toUpperCase();
     const validateKit = searchParams.get("validateKit") === "true";
+    const sort = (searchParams.get("sort") || "").trim().toLowerCase();
+    const sortDirection = searchParams.get("direction") === "desc" ? "desc" : "asc";
 
     try {
         const filters: string[] = [];
@@ -47,9 +49,14 @@ export async function GET(request: Request) {
         const filterQuery = filters.length
             ? `&$filter=${filters.map(filter => `(${filter})`).join(' and ')}`
             : "";
-        // IMPORTANTE: un solo campo en $orderby para no romper la paginación de SAP Service Layer
-        // El orden por SalesItem se hará en el cliente después de recibir los datos
-        const endpointPath = `/Items?$select=ItemCode,ItemName,SalesItem,Frozen,Valid&$skip=${offset}&$top=${limit}&$orderby=ItemCode asc${filterQuery}`;
+        // Un solo campo en $orderby para conservar la paginación estable de SAP.
+        // En la columna Nro. artículo se usa CreateDate para replicar el orden de creación de SAP.
+        const orderBy = sort === "created"
+            ? `CreateDate ${sortDirection}`
+            : sort === "description"
+                ? `ItemName ${sortDirection}`
+                : "ItemCode asc";
+        const endpointPath = `/Items?$select=ItemCode,ItemName,SalesItem,Frozen,Valid,CreateDate&$skip=${offset}&$top=${limit}&$orderby=${orderBy}${filterQuery}`;
         const itemsRes = await fetchSAP(endpointPath);
 
         if (!itemsRes.ok) {
@@ -87,6 +94,7 @@ export async function GET(request: Request) {
                 isVCode: item.ItemCode?.startsWith('V') ?? false,
                 STATUS: isActive ? 'ACTIVO' : 'INACTIVO',
                 isActive,
+                CREATED_DATE: item.CreateDate || null,
             };
         });
 
