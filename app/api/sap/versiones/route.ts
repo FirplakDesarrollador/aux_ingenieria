@@ -1,23 +1,27 @@
 import { NextResponse } from "next/server";
 import { fetchSAP } from "@/lib/sap";
+import { getCachedSearch, setCachedSearch } from "@/lib/api-search-cache";
 
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") || "";
     const offset = parseInt(searchParams.get("offset") || "0");
     const limit = parseInt(searchParams.get("limit") || "200");
+    const cacheKey = `versions:${search.trim().toUpperCase()}:${offset}:${limit}`;
+    const cached = getCachedSearch<{ data: any[]; hasMore: boolean }>(cacheKey);
+    if (cached) return NextResponse.json(cached, { headers: { "X-SAP-Search-Cache": "HIT" } });
 
     try {
         let filterQuery = "";
         if (search.trim()) {
             const upperSearch = search.trim().toUpperCase();
-            const words = upperSearch.split(/\s+/).filter(w => w.length > 0);
+            const words = upperSearch.split(/\s+/).filter(w => w.length > 0).map(w => w.replace(/'/g, "''"));
 
-            if (words.length === 1) {
-                filterQuery = `&$filter=contains(Code,'${words[0]}') or contains(Name,'${words[0]}')`;
+            if (words.length === 1 && /^\d+$/.test(words[0])) {
+                filterQuery = `&$filter=(Code eq '${words[0]}' or startswith(Code,'${words[0]}'))`;
             } else {
                 const nameFilters = words.map(w => `contains(Name,'${w}')`).join(' and ');
-                filterQuery = `&$filter=(${nameFilters}) or contains(Code,'${words[0]}')`;
+                filterQuery = `&$filter=${nameFilters}`;
             }
         }
 
@@ -38,7 +42,9 @@ export async function GET(request: Request) {
 
         const hasMore = !!(data['odata.nextLink'] || data['@odata.nextLink']);
 
-        return NextResponse.json({ data: formattedData, hasMore });
+        const payload = { data: formattedData, hasMore };
+        setCachedSearch(cacheKey, payload);
+        return NextResponse.json(payload, { headers: { "X-SAP-Search-Cache": "MISS" } });
     } catch (error: any) {
         console.error("[API/versiones]", error.message);
         return NextResponse.json({ error: error.message }, { status: 500 });
