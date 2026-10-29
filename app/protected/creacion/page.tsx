@@ -297,18 +297,58 @@ const getMaterialProductColorRestriction = (sku: any, color: any) => {
 
     return `El producto ${skuCode} no puede crearse con el color de mueble "${colorName}". Para productos de mármol o fibra de vidrio, selecciona un acabado compatible con su material.`;
 };
-const MATERIAL_ONLY_VERSION_TERMS = ["PERF", "PERFORACION"];
+const NEUTRAL_VERSION_CODES = new Set(["000"]);
+const FIBERGLASS_ONLY_VERSION_CODES = new Set([
+    "001", "002", "003", "004", "005", "006", "007", "008", "009",
+    "010", "011", "012", "013", "014", "015", "016", "017", "018", "019",
+]);
+const FIBERGLASS_ONLY_VERSION_TERMS = [
+    "CROMO", "LUZ", "LUCES", "MANTENEDOR", "CASCADA", "CGRAN", "CRM",
+    "FILT", "FILTRO", "EXTX", "LIBRE",
+];
+const MARBLE_ONLY_VERSION_TERMS = ["PERF", "PERFORACION"];
+const FURNITURE_ALLOWED_VERSION_TERMS = [
+    "MRH", "MUEBLE ESTANDAR", "MUEBLE STANDARD", "TABLERO", "TABLEROS",
+];
+
+const getNormalizedVersion = (version: any) => {
+    const code = normalizeCatalogText(version?.CodigoVersion ?? version?.Code);
+    const name = normalizeCatalogText(version?.Version ?? version?.Name);
+    return { code, name, text: `${code} ${name}`.trim() };
+};
+
+const getMaterialVersionRestriction = (sku: any, version: any) => {
+    if (!sku || !version) return null;
+
+    const { code, text } = getNormalizedVersion(version);
+    const versionName = version?.Version ?? version?.Name ?? code ?? "seleccionada";
+    const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "producto seleccionado";
+
+    const isFiberglassVersion = FIBERGLASS_ONLY_VERSION_CODES.has(code) ||
+        FIBERGLASS_ONLY_VERSION_TERMS.some(term => text.includes(term));
+    if (isFiberglassVersion && !isFiberglassBathProduct(sku)) {
+        return `El producto ${productName} no puede usar la versión "${versionName}". Esta versión corresponde a accesorios de hidroaeros, hidromasajes, tinas o bañeras de fibra de vidrio.`;
+    }
+
+    const isMarbleVersion = MARBLE_ONLY_VERSION_TERMS.some(term => text.includes(term));
+    if (isMarbleVersion && !(isMaterialProduct(sku) && isWorkSurfaceProduct(sku))) {
+        return `El producto ${productName} no puede usar la versión "${versionName}". Las versiones de perforación son exclusivas de mesones, barras, mesas de trabajo y lavaplatos de mármol sintético.`;
+    }
+
+    return null;
+};
 
 const getFurnitureVersionRestriction = (sku: any, version: any) => {
     if (!sku || !version || !isFurnitureProduct(sku)) return null;
 
-    const versionCode = version?.CodigoVersion ?? version?.Code ?? "seleccionada";
-    const versionName = version?.Version ?? version?.Name ?? versionCode;
-    const normalizedVersion = normalizeCatalogText(`${versionCode} ${versionName}`);
-    if (!MATERIAL_ONLY_VERSION_TERMS.some(term => normalizedVersion.includes(term))) return null;
+    const { code, text } = getNormalizedVersion(version);
+    const versionName = version?.Version ?? version?.Name ?? code ?? "seleccionada";
+    const isAllowedFurnitureVersion = NEUTRAL_VERSION_CODES.has(code) ||
+        FURNITURE_ALLOWED_VERSION_TERMS.some(term => text.includes(term));
+    if (isAllowedFurnitureVersion) return null;
 
     const skuCode = sku?.SKU ?? sku?.ItemCode ?? "mueble seleccionado";
-    return `El mueble ${skuCode} no puede usar la versión "${versionName}" porque las versiones de perforación son exclusivas de mesones. Selecciona una versión compatible con muebles.`;
+    return `El mueble ${skuCode} no puede usar la versión "${versionName}". Para muebles solo se permiten versiones MRH, mueble estándar, de tableros o la versión neutra 000; no se permiten versiones de accesorios.`;
 };
 
 const getProductConfigurationRestriction = (sku: any, color: any, version?: any) =>
@@ -317,13 +357,8 @@ const getProductConfigurationRestriction = (sku: any, color: any, version?: any)
     getFiberglassBathMarbleColorRestriction(sku, color) ||
     getFurnitureColorRestriction(sku, color) ||
     getMaterialProductColorRestriction(sku, color) ||
-    getFurnitureVersionRestriction(sku, version);
-const getProductColorRestriction = (sku: any, color: any) =>
-    getSyntheticMarbleWorkSurfaceColorRestriction(sku, color) ||
-    getWorkSurfaceOnlyColorRestriction(sku, color) ||
-    getFiberglassBathMarbleColorRestriction(sku, color) ||
-    getFurnitureColorRestriction(sku, color) ||
-    getMaterialProductColorRestriction(sku, color);
+    getFurnitureVersionRestriction(sku, version) ||
+    getMaterialVersionRestriction(sku, version);
 const buildConfiguredSku = (sku: any, color: any, version?: any) => {
     const skuCode = normalizeCatalogText(sku?.SKU ?? sku?.ItemCode);
     const colorCode = normalizeCatalogText(color?.CodigoColor ?? color?.Code);
@@ -667,11 +702,9 @@ export default function CreacionPage() {
     // realizado en un orden diferente (SKU antes/después del color).
     useEffect(() => {
         if (selectedAction !== "estructura" && selectedAction !== "de_cero") return;
-        if (!selectedSku || !selectedColor) return;
+        if (!selectedSku) return;
 
-        const restriction = selectedAction === "estructura"
-            ? getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion)
-            : getProductColorRestriction(selectedSku, selectedColor);
+        const restriction = getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion);
 
         if (restriction) setDetailedError(restriction);
     }, [selectedAction, selectedSku, selectedColor, selectedVersion]);
@@ -712,7 +745,7 @@ export default function CreacionPage() {
         const configurationRestriction = selectedAction === "estructura"
             ? getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion)
             : selectedAction === "de_cero"
-                ? getProductColorRestriction(selectedSku, selectedColor)
+                ? getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion)
                 : null;
         if (configurationRestriction) {
             setDetailedError(configurationRestriction);
@@ -858,8 +891,8 @@ export default function CreacionPage() {
             const configurationRestriction =
                 selectedAction === "estructura" && (field === "sku" || field === "color" || field === "version")
                     ? getProductConfigurationRestriction(candidateSku, candidateColor, candidateVersion)
-                    : selectedAction === "de_cero" && (field === "sku" || field === "color")
-                        ? getProductColorRestriction(candidateSku, candidateColor)
+                    : selectedAction === "de_cero" && (field === "sku" || field === "color" || field === "version")
+                        ? getProductConfigurationRestriction(candidateSku, candidateColor, candidateVersion)
                         : null;
 
             if (configurationRestriction) {
