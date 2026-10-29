@@ -1006,9 +1006,9 @@ export default function CreacionPage() {
                 <div className={`absolute top-[calc(100%-1.5rem)] left-1/2 -translate-x-1/2 ${field === 'version' ? 'w-auto min-w-[100%]' : field === 'kit_sku' ? 'w-[130%]' : 'w-[150%]'} bg-white rounded-[1.2rem] shadow-[0_25px_60px_rgba(15,23,42,0.18)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300`}>
                     {/* Header Match ScreenShot */}
                     <div className="flex bg-[#eff2f5] border-b border-slate-200 font-black text-[0.65rem] tracking-[0.2em] text-[#324f5f]/60 uppercase italic">
-                        <button type="button" onDoubleClick={() => toggleSort("code")} title="Doble clic para ordenar A–Z o Z–A" className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
+                        <button type="button" onClick={() => toggleSort("code")} title="Clic para ordenar de menor a mayor o de mayor a menor" className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
                             <span>{h1}</span>
-                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{activeSort.direction === "asc" ? "A–Z" : "Z–A"}</span>}
+                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{activeSort.direction === "asc" ? "MENOR–MAYOR" : "MAYOR–MENOR"}</span>}
                         </button>
                         <button type="button" onDoubleClick={() => toggleSort("description")} title="Doble clic para ordenar A–Z o Z–A" className="flex w-[75%] cursor-pointer items-center justify-between px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
                             <span>{h2}</span>
