@@ -50,13 +50,13 @@ export async function GET(request: Request) {
             ? `&$filter=${filters.map(filter => `(${filter})`).join(' and ')}`
             : "";
         // Un solo campo en $orderby para conservar la paginación estable de SAP.
-        // En la columna Nro. artículo se usa CreateDate para replicar el orden de creación de SAP.
-        const orderBy = sort === "created"
-            ? `CreateDate ${sortDirection}`
+        // SAP muestra el último consecutivo creado ordenando ItemCode de forma descendente.
+        const orderBy = sort === "code"
+            ? `ItemCode ${sortDirection}`
             : sort === "description"
                 ? `ItemName ${sortDirection}`
                 : "ItemCode asc";
-        const endpointPath = `/Items?$select=ItemCode,ItemName,SalesItem,Frozen,Valid,CreateDate&$skip=${offset}&$top=${limit}&$orderby=${orderBy}${filterQuery}`;
+        const endpointPath = `/Items?$select=ItemCode,ItemName,SalesItem,Frozen,Valid&$skip=${offset}&$top=${limit}&$orderby=${orderBy}${filterQuery}`;
         const itemsRes = await fetchSAP(endpointPath);
 
         if (!itemsRes.ok) {
@@ -94,7 +94,6 @@ export async function GET(request: Request) {
                 isVCode: item.ItemCode?.startsWith('V') ?? false,
                 STATUS: isActive ? 'ACTIVO' : 'INACTIVO',
                 isActive,
-                CREATED_DATE: item.CreateDate || null,
             };
         });
 

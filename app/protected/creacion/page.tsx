@@ -488,7 +488,7 @@ export default function CreacionPage() {
         const catalogType = field === "sku" && selectedAction === "de_cero"
             ? "item-groups"
             : (field === "sku" && selectedAction === "estructura") || field === "kit_sku"
-                ? `${field}-ventas-v3-${activeSortToken}`
+                ? `${field}-ventas-v4-${activeSortToken}`
                 : field;
         const cacheKey = `${catalogType}:${value.trim().toUpperCase()}:${offset}`;
         if (!isAppending) {
@@ -538,7 +538,7 @@ export default function CreacionPage() {
                     ? "&vOnly=true"
                     : "";
             const serverSort = ((field === "sku" && selectedAction === "estructura") || field === "kit_sku") && sortConfig?.field === field
-                ? `&sort=${sortConfig.column === "code" ? "created" : "description"}&direction=${sortConfig.direction}`
+                ? `&sort=${sortConfig.column === "code" ? "code" : "description"}&direction=${sortConfig.direction}`
                 : "";
             const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}${serverSort}`;
             const res = await fetch(url, {
@@ -964,21 +964,21 @@ export default function CreacionPage() {
                 : results;
             if (visibleResults.length === 0 && !isLoading) return null;
 
-            const toggleSort = (column: SortColumn) => {
+            const toggleSort = (column: SortColumn, firstDirection: "asc" | "desc" = "asc") => {
                 if (!field) return;
                 setSortConfig(current => ({
                     field,
                     column,
-                    direction: current?.field === field && current.column === column && current.direction === "asc"
-                        ? "desc"
-                        : "asc",
+                    direction: current?.field === field && current.column === column
+                        ? (current.direction === "asc" ? "desc" : "asc")
+                        : firstDirection,
                 }));
             };
             const activeSort = field && sortConfig?.field === field ? sortConfig : null;
             const sortedVisibleResults = activeSort
                 ? [...visibleResults].sort((left, right) => {
                     const getValue = (item: any) => activeSort.column === "code"
-                        ? (isArticleSearch ? `${item.CREATED_DATE || ""} ${item.SKU || ""}` : field === "sku" ? item.SKU : field === "color" ? item.CodigoColor : item.CodigoVersion)
+                        ? (field === "sku" || field === "kit_sku" ? item.SKU : field === "color" ? item.CodigoColor : item.CodigoVersion)
                         : (field === "sku" || field === "kit_sku" ? item.DESCRIPCION : field === "color" ? item.Color : item.Version);
                     const comparison = normalizeCatalogText(getValue(left)).localeCompare(
                         normalizeCatalogText(getValue(right)),
@@ -1013,9 +1013,9 @@ export default function CreacionPage() {
                 <div className={`absolute top-[calc(100%-1.5rem)] left-1/2 -translate-x-1/2 ${field === 'version' ? 'w-auto min-w-[100%]' : field === 'kit_sku' ? 'w-[130%]' : 'w-[150%]'} bg-white rounded-[1.2rem] shadow-[0_25px_60px_rgba(15,23,42,0.18)] border border-slate-200 overflow-hidden z-[200] animate-in fade-in slide-in-from-top-2 duration-300`}>
                     {/* Header Match ScreenShot */}
                     <div className="flex bg-[#eff2f5] border-b border-slate-200 font-black text-[0.65rem] tracking-[0.2em] text-[#324f5f]/60 uppercase italic">
-                        <button type="button" onClick={() => toggleSort("code")} title={isArticleSearch ? "Clic para ordenar del primer SKU creado al último o en orden inverso" : "Clic para ordenar de menor a mayor o en orden inverso"} className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
+                        <button type="button" onDoubleClick={() => toggleSort("code", "desc")} title={isArticleSearch ? "Doble clic para mostrar primero el último SKU creado" : "Doble clic para ordenar de mayor a menor o en orden inverso"} className="flex w-[25%] cursor-pointer items-center justify-between border-r border-[#dee2e6] px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
                             <span>{h1}</span>
-                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{isArticleSearch ? (activeSort.direction === "asc" ? "PRIMERO–ÚLTIMO" : "ÚLTIMO–PRIMERO") : (activeSort.direction === "asc" ? "MENOR–MAYOR" : "MAYOR–MENOR")}</span>}
+                            {activeSort?.column === "code" && <span className="ml-2 whitespace-nowrap text-[#3499CD]">{isArticleSearch ? (activeSort.direction === "desc" ? "ÚLTIMO SKU" : "PRIMER SKU") : (activeSort.direction === "asc" ? "MENOR–MAYOR" : "MAYOR–MENOR")}</span>}
                         </button>
                         <button type="button" onClick={() => toggleSort("description")} title="Clic para ordenar A–Z o Z–A" className="flex w-[75%] cursor-pointer items-center justify-between px-6 py-3.5 text-left hover:bg-[#e3e9ee]">
                             <span>{h2}</span>
