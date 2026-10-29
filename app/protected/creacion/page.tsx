@@ -1233,10 +1233,15 @@ export default function CreacionPage() {
                                     </div>
 
                                     <div className="relative space-y-4" ref={versionRef}>
-                                        <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Versión</label>
-                                        <p className="mx-2 rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083]">
-                                            <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
-                                        </p>
+                                        <div className="group/version-help relative ml-2 flex w-fit items-center gap-2">
+                                            <label className="text-[#64748B] font-bold text-[0.9rem]">Buscar Versión</label>
+                                            <button type="button" aria-label="Ver ejemplo de versiones" className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-[#3499CD] text-[0.7rem] font-black leading-none text-[#3499CD] outline-none transition-transform hover:scale-110 focus:scale-110">
+                                                ?
+                                            </button>
+                                            <div className="pointer-events-none absolute left-0 top-full z-[220] mt-3 w-[340px] rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083] opacity-0 shadow-xl transition-all duration-200 group-hover/version-help:opacity-100 group-focus-within/version-help:opacity-100">
+                                                <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
+                                            </div>
+                                        </div>
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1415,10 +1420,15 @@ export default function CreacionPage() {
 
                                     {/* Version */}
                                     <div className="relative space-y-4" ref={versionRef}>
-                                        <label className="text-[#64748B] font-bold text-[0.9rem] ml-2">Buscar Versión</label>
-                                        <p className="mx-2 rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083]">
-                                            <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
-                                        </p>
+                                        <div className="group/version-help relative ml-2 flex w-fit items-center gap-2">
+                                            <label className="text-[#64748B] font-bold text-[0.9rem]">Buscar Versión</label>
+                                            <button type="button" aria-label="Ver ejemplo de versiones" className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-[#3499CD] text-[0.7rem] font-black leading-none text-[#3499CD] outline-none transition-transform hover:scale-110 focus:scale-110">
+                                                ?
+                                            </button>
+                                            <div className="pointer-events-none absolute left-0 top-full z-[220] mt-3 w-[340px] rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-[0.78rem] font-semibold leading-relaxed text-[#527083] opacity-0 shadow-xl transition-all duration-200 group-hover/version-help:opacity-100 group-focus-within/version-help:opacity-100">
+                                                <span className="font-black text-[#0F364B]">Ejemplo:</span> la versión identifica una variación del mismo producto, como un mesón <span className="font-bold">sin perforación</span> o <span className="font-bold">con perforación</span>. Puedes buscarla por código o por una palabra de su nombre.
+                                            </div>
+                                        </div>
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
