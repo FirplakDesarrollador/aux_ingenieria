@@ -1355,7 +1355,7 @@ export default function CreacionPage() {
 
                                 {/* Kit Name Field */}
                                 <div className="space-y-4">
-                                    <FieldHelp large label="Nombre del Kit" help="Describe los productos principales del kit, por ejemplo KIT LVM OSLO 79X48 - MUEBLE VITELI 79X48." />
+                                    <label className="ml-2 text-[1rem] font-bold text-[#64748B]">Nombre del Kit</label>
                                     <textarea
                                         value={kitName}
                                         onChange={(e) => setKitName(e.target.value.toUpperCase())}
@@ -1494,7 +1494,7 @@ export default function CreacionPage() {
 
                                 {/* Row 3: Comentarios */}
                                 <div className="space-y-4">
-                                    <FieldHelp label="Insertar comentarios" help="Explica el producto solicitado y cualquier detalle que no esté representado por el color o la versión." />
+                                    <label className="ml-2 text-[0.9rem] font-bold text-[#64748B]">Insertar comentarios</label>
                                     <textarea
                                         rows={4}
                                         value={comentarios}
