@@ -297,68 +297,32 @@ const getMaterialProductColorRestriction = (sku: any, color: any) => {
 
     return `El producto ${skuCode} no puede crearse con el color de mueble "${colorName}". Para productos de mármol o fibra de vidrio, selecciona un acabado compatible con su material.`;
 };
-const NEUTRAL_VERSION_CODES = new Set(["000"]);
-const FIBERGLASS_ONLY_VERSION_CODES = new Set([
-    "001", "002", "003", "004", "005", "006", "007", "008", "009",
-    "010", "011", "012", "013", "014", "015", "016", "017", "018", "019",
-]);
-const FIBERGLASS_ONLY_VERSION_TERMS = [
-    "CROMO", "LUZ", "LUCES", "MANTENEDOR", "CASCADA", "CGRAN", "CRM",
-    "FILT", "FILTRO", "EXTX", "LIBRE",
-];
-const MARBLE_ONLY_VERSION_TERMS = ["PERF", "PERFORACION"];
-const FURNITURE_ALLOWED_VERSION_TERMS = [
-    "MRH", "MUEBLE ESTANDAR", "MUEBLE STANDARD", "TABLERO", "TABLEROS",
-];
-
-const getNormalizedVersion = (version: any) => {
-    const code = normalizeCatalogText(version?.CodigoVersion ?? version?.Code);
-    const name = normalizeCatalogText(version?.Version ?? version?.Name);
-    return { code, name, text: `${code} ${name}`.trim() };
-};
-
-const getMaterialVersionRestriction = (sku: any, version: any) => {
-    if (!sku || !version) return null;
-
-    const { code, text } = getNormalizedVersion(version);
-    const versionName = version?.Version ?? version?.Name ?? code ?? "seleccionada";
-    const productName = sku?.GROUP_NAME ?? sku?.DESCRIPCION ?? sku?.SKU ?? sku?.ItemCode ?? "producto seleccionado";
-
-    const isFiberglassVersion = FIBERGLASS_ONLY_VERSION_CODES.has(code) ||
-        FIBERGLASS_ONLY_VERSION_TERMS.some(term => text.includes(term));
-    if (isFiberglassVersion && !isFiberglassBathProduct(sku)) {
-        return `El producto ${productName} no puede usar la versión "${versionName}". Esta versión corresponde a accesorios de hidroaeros, hidromasajes, tinas o bañeras de fibra de vidrio.`;
+const getVersionContextKey = (action: string | null, item: any) => {
+    if (!item) return "";
+    if (action === "de_cero") {
+        const groupCode = item?.GROUP_CODE ?? item?.SKU;
+        return groupCode !== undefined && groupCode !== null ? `GROUP:${groupCode}` : "";
     }
 
-    const isMarbleVersion = MARBLE_ONLY_VERSION_TERMS.some(term => text.includes(term));
-    if (isMarbleVersion && !(isMaterialProduct(sku) && isWorkSurfaceProduct(sku))) {
-        return `El producto ${productName} no puede usar la versión "${versionName}". Las versiones de perforación son exclusivas de mesones, barras, mesas de trabajo y lavaplatos de mármol sintético.`;
-    }
-
-    return null;
+    const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
+    const segments = sku.split("-").filter(Boolean);
+    return segments.length >= 2 ? `SKU:${segments.slice(0, 2).join("-")}` : "";
 };
 
-const getFurnitureVersionRestriction = (sku: any, version: any) => {
-    if (!sku || !version || !isFurnitureProduct(sku)) return null;
+const getVersionContextRestriction = (action: string | null, item: any, version: any) => {
+    if (!version) return null;
+    const expectedContext = getVersionContextKey(action, item);
+    if (expectedContext && version?.ContextKey === expectedContext) return null;
 
-    const { code, text } = getNormalizedVersion(version);
-    const versionName = version?.Version ?? version?.Name ?? code ?? "seleccionada";
-    const isAllowedFurnitureVersion = NEUTRAL_VERSION_CODES.has(code) ||
-        FURNITURE_ALLOWED_VERSION_TERMS.some(term => text.includes(term));
-    if (isAllowedFurnitureVersion) return null;
-
-    const skuCode = sku?.SKU ?? sku?.ItemCode ?? "mueble seleccionado";
-    return `El mueble ${skuCode} no puede usar la versión "${versionName}". Para muebles solo se permiten versiones MRH, mueble estándar, de tableros o la versión neutra 000; no se permiten versiones de accesorios.`;
+    return "La versión seleccionada no corresponde a las variantes que ya existen en SAP para este producto o grupo. Selecciona nuevamente la versión después de elegir el SKU o grupo de artículos.";
 };
 
-const getProductConfigurationRestriction = (sku: any, color: any, version?: any) =>
+const getProductConfigurationRestriction = (sku: any, color: any, _version?: any) =>
     getSyntheticMarbleWorkSurfaceColorRestriction(sku, color) ||
     getWorkSurfaceOnlyColorRestriction(sku, color) ||
     getFiberglassBathMarbleColorRestriction(sku, color) ||
     getFurnitureColorRestriction(sku, color) ||
-    getMaterialProductColorRestriction(sku, color) ||
-    getFurnitureVersionRestriction(sku, version) ||
-    getMaterialVersionRestriction(sku, version);
+    getMaterialProductColorRestriction(sku, color);
 const buildConfiguredSku = (sku: any, color: any, version?: any) => {
     const skuCode = normalizeCatalogText(sku?.SKU ?? sku?.ItemCode);
     const colorCode = normalizeCatalogText(color?.CodigoColor ?? color?.Code);
@@ -490,6 +454,11 @@ export default function CreacionPage() {
 
     const performSearch = useCallback(async (field: ActiveField, value: string, isAppending = false) => {
         if (!field) return;
+        if (field === "version" && !selectedSku) {
+            setVersionResults([]);
+            setDetailedError("Selecciona primero el SKU de referencia o el grupo de artículos. Las versiones se cargarán según las combinaciones que ya existen en SAP.");
+            return;
+        }
 
         // Si es una nueva búsqueda, abortamos la petición anterior de ese campo
         if (!isAppending) {
@@ -505,7 +474,12 @@ export default function CreacionPage() {
         fetchingRef.current[field] = true;
 
         if (!isAppending && value.trim().length > 0) {
-            if (field === "sku" && (selectedSku?.SKU !== value && selectedSku?.DESCRIPCION !== value)) setSelectedSku(null);
+            if (field === "sku" && (selectedSku?.SKU !== value && selectedSku?.DESCRIPCION !== value)) {
+                setSelectedSku(null);
+                setVersionInput("");
+                setSelectedVersion(null);
+                setVersionResults([]);
+            }
             else if (field === "color" && (selectedColor?.Color !== value && selectedColor?.CodigoColor !== value)) setSelectedColor(null);
             else if (field === "version" && (selectedVersion?.Version !== value && selectedVersion?.CodigoVersion !== value)) setSelectedVersion(null);
         }
@@ -524,7 +498,9 @@ export default function CreacionPage() {
             ? "item-groups"
             : (field === "sku" && selectedAction === "estructura") || field === "kit_sku"
                 ? `${field}-ventas-v4-${activeSortToken}`
-                : field;
+                : field === "version"
+                    ? `version-${getVersionContextKey(selectedAction, selectedSku)}`
+                    : field;
         const cacheKey = `${catalogType}:${value.trim().toUpperCase()}:${offset}`;
         if (!isAppending) {
             const cached = searchCacheRef.current.get(cacheKey);
@@ -575,7 +551,12 @@ export default function CreacionPage() {
             const serverSort = ((field === "sku" && selectedAction === "estructura") || field === "kit_sku") && sortConfig?.field === field
                 ? `&sort=${sortConfig.column === "code" ? "code" : "description"}&direction=${sortConfig.direction}`
                 : "";
-            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}${serverSort}`;
+            const versionContext = field === "version"
+                ? selectedAction === "de_cero"
+                    ? `&groupCode=${encodeURIComponent(String(selectedSku?.GROUP_CODE ?? selectedSku?.SKU ?? ""))}`
+                    : `&sku=${encodeURIComponent(selectedSku?.SKU ?? "")}`
+                : "";
+            const url = `${endpoint}?search=${encodeURIComponent(value)}&offset=${offset}&limit=${BATCH_SIZE}${skuFilters}${serverSort}${versionContext}`;
             const res = await fetch(url, {
                 signal: currentController?.signal
             });
@@ -645,6 +626,7 @@ export default function CreacionPage() {
                         activeField === "kit_sku" ? kitInput : versionInput;
             // En el selector de grupos, limpiar el texto vuelve a cargar la lista completa.
             const isGroupSelector = activeField === "sku" && selectedAction === "de_cero";
+            const isContextualVersionSelector = activeField === "version" && Boolean(selectedSku);
             const clearCurrentSearch = () => {
                 abortControllersRef.current[activeField]?.abort();
                 abortControllersRef.current[activeField] = null;
@@ -658,13 +640,13 @@ export default function CreacionPage() {
                 setLoadingMore(prev => ({ ...prev, [activeField]: false }));
                 setHasMore(prev => ({ ...prev, [activeField]: true }));
             };
-            if (!isGroupSelector && val.trim().length === 0) {
+            if (!isGroupSelector && !isContextualVersionSelector && val.trim().length === 0) {
                 clearCurrentSearch();
                 return;
             }
             // Las búsquedas de una sola letra obligan a SAP a recorrer casi todo
             // el catálogo y normalmente se reemplazan enseguida al seguir escribiendo.
-            if (!isGroupSelector && val.trim().length === 1) {
+            if (!isGroupSelector && !isContextualVersionSelector && val.trim().length === 1) {
                 clearCurrentSearch();
                 return;
             }
@@ -682,10 +664,15 @@ export default function CreacionPage() {
         if (field !== "kit_sku") setKitResults([]);
 
         setActiveField(field);
+        if (field === "version" && !selectedSku) {
+            setDetailedError("Selecciona primero el SKU de referencia o el grupo de artículos para mostrar únicamente sus versiones existentes en SAP.");
+            return;
+        }
         const isGroupSelector = field === "sku" && selectedAction === "de_cero";
+        const isContextualVersionSelector = field === "version" && Boolean(selectedSku);
         const val = field === "sku" ? skuInput : field === "color" ? colorInput : field === "kit_sku" ? kitInput : versionInput;
-        if (isGroupSelector || val.trim().length > 0) {
-            performSearch(field, isGroupSelector ? "" : val);
+        if (isGroupSelector || isContextualVersionSelector || val.trim().length > 0) {
+            performSearch(field, isGroupSelector || isContextualVersionSelector ? "" : val);
         }
     };
 
@@ -704,7 +691,8 @@ export default function CreacionPage() {
         if (selectedAction !== "estructura" && selectedAction !== "de_cero") return;
         if (!selectedSku) return;
 
-        const restriction = getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion);
+        const restriction = getVersionContextRestriction(selectedAction, selectedSku, selectedVersion) ||
+            getProductConfigurationRestriction(selectedSku, selectedColor, selectedVersion);
 
         if (restriction) setDetailedError(restriction);
     }, [selectedAction, selectedSku, selectedColor, selectedVersion]);
@@ -739,6 +727,13 @@ export default function CreacionPage() {
             const error = "Selecciona el SKU de referencia desde la lista desplegable antes de finalizar.";
             setDetailedError(error);
             alert(error);
+            return;
+        }
+
+        const versionContextRestriction = getVersionContextRestriction(selectedAction, selectedSku, selectedVersion);
+        if (versionContextRestriction) {
+            setDetailedError(versionContextRestriction);
+            alert(versionContextRestriction);
             return;
         }
 
@@ -887,7 +882,13 @@ export default function CreacionPage() {
 
             const candidateSku = field === "sku" ? item : selectedSku;
             const candidateColor = field === "color" ? item : selectedColor;
-            const candidateVersion = field === "version" ? item : selectedVersion;
+            const candidateVersion = field === "sku" ? null : field === "version" ? item : selectedVersion;
+            const versionContextRestriction = getVersionContextRestriction(selectedAction, candidateSku, candidateVersion);
+            if (versionContextRestriction) {
+                setDetailedError(versionContextRestriction);
+                setTimeout(() => setDetailedError(null), 7000);
+                return;
+            }
             const configurationRestriction =
                 selectedAction === "estructura" && (field === "sku" || field === "color" || field === "version")
                     ? getProductConfigurationRestriction(candidateSku, candidateColor, candidateVersion)
@@ -920,6 +921,9 @@ export default function CreacionPage() {
             if (field === "sku") {
                 setSkuInput(item.SKU);
                 setSelectedSku(item);
+                setVersionInput("");
+                setSelectedVersion(null);
+                setVersionResults([]);
             } else if (field === "color") {
                 setColorInput(item.CodigoColor); // Match screenshot: use code instead of name
                 setSelectedColor(item);
@@ -1320,7 +1324,7 @@ export default function CreacionPage() {
                                     </div>
 
                                     <div className="relative space-y-4" ref={versionRef}>
-                                        <FieldHelp label="Buscar Versión" help="La versión identifica una variación del mismo producto, como un mesón sin perforación o con perforación. Búscala por código o nombre." />
+                                        <FieldHelp label="Buscar Versión" help="Primero selecciona el SKU. Aquí aparecerán únicamente las versiones que ya existen en SAP para esa misma referencia, como estándar, MRH o variantes de perforación según corresponda." />
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"
@@ -1499,7 +1503,7 @@ export default function CreacionPage() {
 
                                     {/* Version */}
                                     <div className="relative space-y-4" ref={versionRef}>
-                                        <FieldHelp label="Buscar Versión" help="La versión identifica una variación del producto, como sin perforación o con perforación. Búscala por código o nombre." />
+                                        <FieldHelp label="Buscar Versión" help="Primero selecciona el grupo de artículos. Aquí aparecerán únicamente las versiones usadas por códigos de venta existentes en SAP dentro de ese grupo." />
                                         <div className={`relative transition-all duration-700 ${activeField === 'version' ? 'scale-[1.02] z-[201]' : 'z-10'}`}>
                                             <input
                                                 type="text"

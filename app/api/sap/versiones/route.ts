@@ -2,49 +2,146 @@ import { NextResponse } from "next/server";
 import { fetchSAP } from "@/lib/sap";
 import { getCachedSearch, setCachedSearch } from "@/lib/api-search-cache";
 
-export async function GET(request: Request) {
-    const { searchParams } = new URL(request.url);
-    const search = searchParams.get("search") || "";
-    const offset = parseInt(searchParams.get("offset") || "0");
-    const limit = parseInt(searchParams.get("limit") || "200");
-    const cacheKey = `versions:${search.trim().toUpperCase()}:${offset}:${limit}`;
-    const cached = getCachedSearch<{ data: any[]; hasMore: boolean }>(cacheKey);
-    if (cached) return NextResponse.json(cached, { headers: { "X-SAP-Search-Cache": "HIT" } });
+type SapItem = {
+    ItemCode?: string;
+    ItemName?: string;
+};
 
-    try {
-        let filterQuery = "";
-        if (search.trim()) {
-            const upperSearch = search.trim().toUpperCase();
-            const words = upperSearch.split(/\s+/).filter(w => w.length > 0).map(w => w.replace(/'/g, "''"));
+type ContextVersion = {
+    CodigoVersion: string;
+    Version: string;
+    EjemploSAP: string;
+    CantidadSAP: number;
+    ContextKey: string;
+};
 
-            if (words.length === 1 && /^\d+$/.test(words[0])) {
-                filterQuery = `&$filter=(Code eq '${words[0]}' or startswith(Code,'${words[0]}'))`;
-            } else {
-                const nameFilters = words.map(w => `contains(Name,'${w}')`).join(' and ');
-                filterQuery = `&$filter=${nameFilters}`;
-            }
+const VERSION_LABELS: Record<string, string> = {
+    "000": "ESTÁNDAR / BASE",
+    MRH: "MUEBLE MRH",
+    SNG: "SIN PERFORACIÓN",
+    DER: "PERFORACIÓN DERECHA",
+    IZQ: "PERFORACIÓN IZQUIERDA",
+    V2D: "VERSIÓN 2 - PERFORACIÓN DERECHA",
+    V2I: "VERSIÓN 2 - PERFORACIÓN IZQUIERDA",
+};
+
+const normalizeText = (value: unknown) =>
+    String(value ?? "")
+        .toUpperCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim();
+
+const getReferenceBase = (sku: string) => {
+    const segments = normalizeText(sku).split("-").filter(Boolean);
+    return segments.length >= 2 ? segments.slice(0, 2).join("-") : "";
+};
+
+const getVersionCode = (itemCode: string) => {
+    const segments = normalizeText(itemCode).split("-");
+    return segments.length >= 4 ? segments.at(-2) ?? "" : "";
+};
+
+const loadVersionsFromExistingItems = async (contextKey: string, sapFilter: string) => {
+    const cacheKey = `versions-context:${contextKey}`;
+    const cached = getCachedSearch<ContextVersion[]>(cacheKey);
+    if (cached) return cached;
+
+    const items: SapItem[] = [];
+    let sapOffset = 0;
+    const sapPageSize = 1000;
+
+    while (sapOffset < 15000) {
+        const endpoint = `/Items?$select=ItemCode,ItemName&$filter=${sapFilter}&$orderby=ItemCode asc&$skip=${sapOffset}&$top=${sapPageSize}`;
+        const response = await fetchSAP(endpoint);
+        if (!response.ok) {
+            const details = await response.text().catch(() => response.statusText);
+            throw new Error(`SAP error ${response.status}: ${details}`);
         }
 
-        const endpointPath = `/U_FIR_VERSION?$skip=${offset}&$top=${limit}&$orderby=Code asc${filterQuery}`;
-        const res = await fetchSAP(endpointPath);
+        const payload = await response.json();
+        const page: SapItem[] = payload.value || [];
+        items.push(...page);
+        sapOffset += page.length;
 
-        if (!res.ok) {
-            const errText = await res.text().catch(() => res.statusText);
-            throw new Error(`SAP error ${res.status}: ${errText}`);
+        const hasNextPage = Boolean(payload["odata.nextLink"] || payload["@odata.nextLink"]);
+        if (!hasNextPage || page.length === 0) break;
+    }
+
+    const versions = new Map<string, { sample: string; count: number }>();
+    for (const item of items) {
+        const code = getVersionCode(item.ItemCode || "");
+        if (!code) continue;
+
+        const current = versions.get(code);
+        if (current) {
+            current.count += 1;
+        } else {
+            versions.set(code, {
+                sample: String(item.ItemName || item.ItemCode || code),
+                count: 1,
+            });
         }
+    }
 
-        const data = await res.json();
-
-        const formattedData = (data.value || []).map((item: any) => ({
-            CodigoVersion: item.Code,
-            Version: item.Name
+    const data = [...versions.entries()]
+        .map(([code, details]) => ({
+            CodigoVersion: code,
+            Version: VERSION_LABELS[code] || `USADA EN SAP: ${details.sample}`,
+            EjemploSAP: details.sample,
+            CantidadSAP: details.count,
+            ContextKey: contextKey,
+        }))
+        .sort((left, right) => left.CodigoVersion.localeCompare(right.CodigoVersion, "es", {
+            numeric: true,
+            sensitivity: "base",
         }));
 
-        const hasMore = !!(data['odata.nextLink'] || data['@odata.nextLink']);
+    setCachedSearch(cacheKey, data);
+    return data;
+};
 
-        const payload = { data: formattedData, hasMore };
-        setCachedSearch(cacheKey, payload);
-        return NextResponse.json(payload, { headers: { "X-SAP-Search-Cache": "MISS" } });
+export async function GET(request: Request) {
+    const { searchParams } = new URL(request.url);
+    const search = normalizeText(searchParams.get("search"));
+    const offset = Math.max(0, parseInt(searchParams.get("offset") || "0", 10) || 0);
+    const limit = Math.min(200, Math.max(1, parseInt(searchParams.get("limit") || "100", 10) || 100));
+    const referenceBase = getReferenceBase(searchParams.get("sku") || "");
+    const groupCode = Number.parseInt(searchParams.get("groupCode") || "", 10);
+
+    try {
+        let contextKey = "";
+        let sapFilter = "";
+
+        if (referenceBase) {
+            const escapedBase = referenceBase.replace(/'/g, "''");
+            contextKey = `SKU:${referenceBase}`;
+            sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'${escapedBase}-')`;
+        } else if (Number.isFinite(groupCode)) {
+            contextKey = `GROUP:${groupCode}`;
+            sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'V') and ItemsGroupCode eq ${groupCode}`;
+        } else {
+            return NextResponse.json({
+                data: [],
+                hasMore: false,
+                error: "Selecciona primero un SKU de referencia o un grupo de artículos para consultar sus versiones existentes en SAP.",
+            }, { status: 400 });
+        }
+
+        const contextualVersions = await loadVersionsFromExistingItems(contextKey, sapFilter);
+        const filteredVersions = search
+            ? contextualVersions.filter(version =>
+                normalizeText(`${version.CodigoVersion} ${version.Version} ${version.EjemploSAP}`).includes(search)
+            )
+            : contextualVersions;
+        const page = filteredVersions.slice(offset, offset + limit);
+
+        return NextResponse.json({
+            data: page,
+            hasMore: offset + page.length < filteredVersions.length,
+            contextKey,
+            total: filteredVersions.length,
+        });
     } catch (error: any) {
         console.error("[API/versiones]", error.message);
         return NextResponse.json({ error: error.message }, { status: 500 });
