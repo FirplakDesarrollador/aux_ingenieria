@@ -46,6 +46,9 @@ const MATERIAL_VERSION_FILTER = [
     "startswith(ItemCode,'VCOC07-')",
     "startswith(ItemCode,'VBAN29-')",
 ].join(" or ");
+const VERSION_CACHE_TTL_MS = 30 * 60 * 1000;
+const contextRequestsInFlight = new Map<string, Promise<ContextVersion[]>>();
+const materialChecksInFlight = new Map<string, Promise<boolean>>();
 
 const normalizeText = (value: unknown) =>
     String(value ?? "")
@@ -89,61 +92,99 @@ const fetchItemsByFilter = async (sapFilter: string) => {
     return items;
 };
 
-const loadMaterialVersionCodes = async () => {
-    const cacheKey = "versions-material-restrictions:v1";
-    const cached = getCachedSearch<string[]>(cacheKey);
-    if (cached) return cached;
+const isMaterialVersionCode = async (versionCode: string) => {
+    if (!versionCode || versionCode === "000") return false;
 
-    const items = await fetchItemsByFilter(`SalesItem eq 'tYES' and (${MATERIAL_VERSION_FILTER})`);
-    const codes = [...new Set(items
-        .map(item => getVersionCode(item.ItemCode || ""))
-        .filter(code => code && code !== "000"))];
-    setCachedSearch(cacheKey, codes);
-    return codes;
+    const cacheKey = `version-material-check:${versionCode}`;
+    const cached = getCachedSearch<boolean>(cacheKey);
+    if (cached !== null) return cached;
+
+    const pending = materialChecksInFlight.get(versionCode);
+    if (pending) return pending;
+
+    const task = (async () => {
+        const escapedCode = versionCode.replace(/'/g, "''");
+        const endpoint = `/Items?$select=ItemCode&$filter=SalesItem eq 'tYES' and (${MATERIAL_VERSION_FILTER}) and contains(ItemCode,'-${escapedCode}-')&$top=1`;
+        const response = await fetchSAP(endpoint);
+        if (!response.ok) {
+            const details = await response.text().catch(() => response.statusText);
+            throw new Error(`SAP error ${response.status}: ${details}`);
+        }
+
+        const payload = await response.json();
+        const isRestricted = (payload.value || []).length > 0;
+        setCachedSearch(cacheKey, isRestricted, VERSION_CACHE_TTL_MS);
+        return isRestricted;
+    })();
+
+    materialChecksInFlight.set(versionCode, task);
+    try {
+        return await task;
+    } finally {
+        materialChecksInFlight.delete(versionCode);
+    }
 };
 
 const loadVersionsFromExistingItems = async (contextKey: string, sapFilter: string, excludeMaterialVersions: boolean) => {
-    const cacheKey = `versions-context:v2:${contextKey}:${excludeMaterialVersions ? "without-material" : "all"}`;
+    const cacheKey = `versions-context:v3:${contextKey}:${excludeMaterialVersions ? "without-material" : "all"}`;
     const cached = getCachedSearch<ContextVersion[]>(cacheKey);
     if (cached) return cached;
 
-    const [items, restrictedCodes] = await Promise.all([
-        fetchItemsByFilter(sapFilter),
-        excludeMaterialVersions ? loadMaterialVersionCodes() : Promise.resolve([]),
-    ]);
-    const restrictedVersions = new Set(restrictedCodes);
+    const pending = contextRequestsInFlight.get(cacheKey);
+    if (pending) return pending;
 
-    const versions = new Map<string, { sample: string; count: number }>();
-    for (const item of items) {
-        const code = getVersionCode(item.ItemCode || "");
-        if (!code || restrictedVersions.has(code)) continue;
+    const task = (async () => {
+        const items = await fetchItemsByFilter(sapFilter);
 
-        const current = versions.get(code);
-        if (current) {
-            current.count += 1;
-        } else {
-            versions.set(code, {
-                sample: String(item.ItemName || item.ItemCode || code),
-                count: 1,
-            });
+        const versions = new Map<string, { sample: string; count: number }>();
+        for (const item of items) {
+            const code = getVersionCode(item.ItemCode || "");
+            if (!code) continue;
+
+            const current = versions.get(code);
+            if (current) {
+                current.count += 1;
+            } else {
+                versions.set(code, {
+                    sample: String(item.ItemName || item.ItemCode || code),
+                    count: 1,
+                });
+            }
         }
+
+        if (excludeMaterialVersions) {
+            const checks = await Promise.all([...versions.keys()].map(async code => ({
+                code,
+                restricted: await isMaterialVersionCode(code),
+            })));
+            for (const check of checks) {
+                if (check.restricted) versions.delete(check.code);
+            }
+        }
+
+        const data = [...versions.entries()]
+            .map(([code, details]) => ({
+                CodigoVersion: code,
+                Version: VERSION_LABELS[code] || `USADA EN SAP: ${details.sample}`,
+                EjemploSAP: details.sample,
+                CantidadSAP: details.count,
+                ContextKey: contextKey,
+            }))
+            .sort((left, right) => left.CodigoVersion.localeCompare(right.CodigoVersion, "es", {
+                numeric: true,
+                sensitivity: "base",
+            }));
+
+        setCachedSearch(cacheKey, data, VERSION_CACHE_TTL_MS);
+        return data;
+    })();
+
+    contextRequestsInFlight.set(cacheKey, task);
+    try {
+        return await task;
+    } finally {
+        contextRequestsInFlight.delete(cacheKey);
     }
-
-    const data = [...versions.entries()]
-        .map(([code, details]) => ({
-            CodigoVersion: code,
-            Version: VERSION_LABELS[code] || `USADA EN SAP: ${details.sample}`,
-            EjemploSAP: details.sample,
-            CantidadSAP: details.count,
-            ContextKey: contextKey,
-        }))
-        .sort((left, right) => left.CodigoVersion.localeCompare(right.CodigoVersion, "es", {
-            numeric: true,
-            sensitivity: "base",
-        }));
-
-    setCachedSearch(cacheKey, data);
-    return data;
 };
 
 export async function GET(request: Request) {

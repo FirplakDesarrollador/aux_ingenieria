@@ -21,7 +21,7 @@ export const getCachedSearch = <T>(key: string): T | null => {
     return cached.payload as T;
 };
 
-export const setCachedSearch = <T>(key: string, payload: T) => {
+export const setCachedSearch = <T>(key: string, payload: T, ttlMs = SEARCH_CACHE_TTL_MS) => {
     if (searchCache.has(key)) searchCache.delete(key);
     while (searchCache.size >= SEARCH_CACHE_MAX_ENTRIES) {
         const oldestKey = searchCache.keys().next().value;
@@ -31,6 +31,6 @@ export const setCachedSearch = <T>(key: string, payload: T) => {
 
     searchCache.set(key, {
         payload,
-        expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+        expiresAt: Date.now() + ttlMs,
     });
 };
