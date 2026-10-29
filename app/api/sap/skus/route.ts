@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { fetchSAP } from "@/lib/sap";
 
+type CachedSkuSearch = { payload: { data: any[]; hasMore: boolean }; expiresAt: number };
+const skuSearchCache = new Map<string, CachedSkuSearch>();
+const SKU_SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
+const SKU_SEARCH_CACHE_MAX_ENTRIES = 200;
+
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") || "";
@@ -14,6 +19,17 @@ export async function GET(request: Request) {
     const sort = (searchParams.get("sort") || "").trim().toLowerCase();
     const sortDirection = searchParams.get("direction") === "desc" ? "desc" : "asc";
 
+    const cacheKey = JSON.stringify({ search: search.trim().toUpperCase(), offset, limit, salesOnly, vOnly, kitComponents, sort, sortDirection });
+    if (!exact && !validateKit) {
+        const cached = skuSearchCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+            return NextResponse.json(cached.payload, {
+                headers: { "X-SAP-Search-Cache": "HIT" },
+            });
+        }
+        if (cached) skuSearchCache.delete(cacheKey);
+    }
+
     try {
         const filters: string[] = [];
 
@@ -26,17 +42,26 @@ export async function GET(request: Request) {
                 .filter(w => w.length > 0)
                 .map(w => w.replace(/'/g, "''"));
 
+            const looksLikeSku = (word: string) =>
+                word.startsWith("V") || word.includes("-") || /^[A-Z]{2,}\d/.test(word);
+
             if (words.length === 1) {
                 const w = words[0];
-                const prefix = w.includes('-') ? w.substring(0, w.lastIndexOf('-')) : '';
-                const exactOrContains = prefix
-                    ? `(ItemCode eq '${w}' or startswith(ItemCode,'${prefix}') or contains(ItemCode,'${w}') or contains(ItemName,'${w}'))`
-                    : `(ItemCode eq '${w}' or contains(ItemCode,'${w}') or contains(ItemName,'${w}'))`;
-                filters.push(exactOrContains);
+                // Evita el OR entre código y descripción: en Service Layer ese OR
+                // fuerza recorridos mucho más costosos sobre toda la tabla Items.
+                filters.push(looksLikeSku(w)
+                    ? `(ItemCode eq '${w}' or startswith(ItemCode,'${w}'))`
+                    : `contains(ItemName,'${w}')`);
             } else {
-                const nameFilters = words.map(w => `contains(ItemName,'${w}')`).join(' and ');
-                const codeFilters = words.map(w => `(ItemCode eq '${w}' or contains(ItemCode,'${w}'))`).join(' and ');
-                filters.push(`((${nameFilters}) or (${codeFilters}))`);
+                if (looksLikeSku(words[0])) {
+                    const [first, ...rest] = words;
+                    filters.push([
+                        `(ItemCode eq '${first}' or startswith(ItemCode,'${first}'))`,
+                        ...rest.map(w => `contains(ItemCode,'${w}')`),
+                    ].join(" and "));
+                } else {
+                    filters.push(words.map(w => `contains(ItemName,'${w}')`).join(' and '));
+                }
             }
         }
 
@@ -130,7 +155,21 @@ export async function GET(request: Request) {
         // hasMore: SAP envía nextLink, o como fallback si recibimos exactamente 'limit' items
         const hasMore = !!(data['odata.nextLink'] || data['@odata.nextLink']) || rawItems.length >= limit;
 
-        return NextResponse.json({ data: formattedData, hasMore });
+        const payload = { data: formattedData, hasMore };
+        if (!exact && !validateKit) {
+            if (skuSearchCache.size >= SKU_SEARCH_CACHE_MAX_ENTRIES) {
+                const oldestKey = skuSearchCache.keys().next().value;
+                if (oldestKey) skuSearchCache.delete(oldestKey);
+            }
+            skuSearchCache.set(cacheKey, {
+                payload,
+                expiresAt: Date.now() + SKU_SEARCH_CACHE_TTL_MS,
+            });
+        }
+
+        return NextResponse.json(payload, {
+            headers: { "X-SAP-Search-Cache": "MISS" },
+        });
     } catch (error: any) {
         console.error("[API/skus]", error.message);
         return NextResponse.json({ error: error.message }, { status: 500 });
