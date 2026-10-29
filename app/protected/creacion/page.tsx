@@ -8,6 +8,7 @@ import { getCompleteKitRestriction, suggestKitName, validateKitCandidate } from 
 type ActiveField = "sku" | "color" | "version" | "kit_sku" | null;
 type SortColumn = "code" | "description";
 type SortConfig = { field: Exclude<ActiveField, null>; column: SortColumn; direction: "asc" | "desc" } | null;
+const RESTRICTION_NOTICE_MS = 15_000;
 
 const FieldHelp = ({ label, help, large = false }: { label: string; help: string; large?: boolean }) => (
     <div className="group/field-help relative ml-2 flex w-fit items-center gap-2">
@@ -875,10 +876,10 @@ export default function CreacionPage() {
                 const error = `El SKU ${item.SKU || "seleccionado"} está INACTIVO en SAP y no puede agregarse al kit.`;
                 if (field === "kit_sku") {
                     setKitCompatError(error);
-                    setTimeout(() => setKitCompatError(null), 7000);
+                    setTimeout(() => setKitCompatError(null), RESTRICTION_NOTICE_MS);
                 } else {
                     setDetailedError(error);
-                    setTimeout(() => setDetailedError(null), 7000);
+                    setTimeout(() => setDetailedError(null), RESTRICTION_NOTICE_MS);
                 }
                 return;
             }
@@ -889,7 +890,7 @@ export default function CreacionPage() {
             const versionContextRestriction = getVersionContextRestriction(selectedAction, candidateSku, candidateVersion);
             if (versionContextRestriction) {
                 setDetailedError(versionContextRestriction);
-                setTimeout(() => setDetailedError(null), 7000);
+                setTimeout(() => setDetailedError(null), RESTRICTION_NOTICE_MS);
                 return;
             }
             const configurationRestriction =
@@ -901,7 +902,7 @@ export default function CreacionPage() {
 
             if (configurationRestriction) {
                 setDetailedError(configurationRestriction);
-                setTimeout(() => setDetailedError(null), 7000);
+                setTimeout(() => setDetailedError(null), RESTRICTION_NOTICE_MS);
                 return;
             }
             if (selectedAction === "estructura" && candidateSku && candidateColor && (field === "sku" || field === "color" || field === "version")) {
@@ -937,7 +938,7 @@ export default function CreacionPage() {
                 if (!item.isVCode || !item.isVentas) {
                     const error = "En los kits solo se permiten códigos V marcados como artículos de ventas en SAP.";
                     setKitCompatError(error);
-                    setTimeout(() => setKitCompatError(null), 6000);
+                    setTimeout(() => setKitCompatError(null), RESTRICTION_NOTICE_MS);
                     return;
                 }
                 let validatedKitItem = item;
@@ -947,7 +948,7 @@ export default function CreacionPage() {
                 } catch (error: any) {
                     const message = error.message || "El artículo no tiene una LDM válida para crear kits.";
                     setKitCompatError(message);
-                    setTimeout(() => setKitCompatError(null), 8000);
+                    setTimeout(() => setKitCompatError(null), RESTRICTION_NOTICE_MS);
                     return;
                 } finally {
                     setIsCheckingDuplicate(false);
@@ -965,7 +966,7 @@ export default function CreacionPage() {
                 const compatibilityError = validateKitCandidate(validatedKitItem, kitSelectedItems);
                 if (compatibilityError) {
                     setKitCompatError(compatibilityError);
-                    setTimeout(() => setKitCompatError(null), 6000);
+                    setTimeout(() => setKitCompatError(null), RESTRICTION_NOTICE_MS);
                     return; // Stop adding if incompatible
                 }
 
@@ -974,7 +975,7 @@ export default function CreacionPage() {
                     const pairError = getCompleteKitRestriction(nextKitItems);
                     if (pairError) {
                         setKitCompatError(pairError);
-                        setTimeout(() => setKitCompatError(null), 8000);
+                        setTimeout(() => setKitCompatError(null), RESTRICTION_NOTICE_MS);
                         return;
                     }
                 }
