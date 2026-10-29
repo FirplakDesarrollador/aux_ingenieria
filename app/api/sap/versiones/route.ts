@@ -26,16 +26,6 @@ const VERSION_LABELS: Record<string, string> = {
     V2I: "VERSIÓN 2 - PERFORACIÓN IZQUIERDA",
 };
 
-const FURNITURE_CONTEXT_TERMS = [
-    "MUEBLE", "MBLE", "ALACENA", "GABINETE", "CLOSET", "TABLERO",
-];
-const FURNITURE_CONTEXT_PREFIXES = [
-    "VBAN05", "VBAN06", "VBAN12", "VBAN15", "VBAN16", "VBAN22",
-    "VBAN23", "VBAN24", "VBAN27", "VBAN30", "VBAN31", "VBAN32", "VBAN33",
-    "VCOC01", "VCOC02", "VCOC03", "VCOC08", "VCOC09", "VCLO01",
-    "VROP03", "VROP07", "VROP10", "VROP11", "VROP12", "VOUT03",
-];
-
 const normalizeText = (value: unknown) =>
     String(value ?? "")
         .toUpperCase()
@@ -53,7 +43,7 @@ const getVersionCode = (itemCode: string) => {
     return segments.length >= 4 ? segments.at(-2) ?? "" : "";
 };
 
-const loadVersionsFromExistingItems = async (contextKey: string, contextName: string, sapFilter: string) => {
+const loadVersionsFromExistingItems = async (contextKey: string, sapFilter: string) => {
     const cacheKey = `versions-context:${contextKey}`;
     const cached = getCachedSearch<ContextVersion[]>(cacheKey);
     if (cached) return cached;
@@ -95,39 +85,6 @@ const loadVersionsFromExistingItems = async (contextKey: string, contextName: st
         }
     }
 
-    const normalizedContextName = normalizeText(contextName);
-    const contextSkuPrefix = contextKey.startsWith("SKU:")
-        ? contextKey.slice(4).split("-")[0]
-        : "";
-    const isFurnitureContext = FURNITURE_CONTEXT_PREFIXES.includes(contextSkuPrefix) ||
-        FURNITURE_CONTEXT_TERMS.some(term => normalizedContextName.includes(term)) ||
-        (!contextKey.startsWith("GROUP:") && items.some(item => {
-            const itemName = normalizeText(item.ItemName);
-            return FURNITURE_CONTEXT_TERMS.some(term => itemName.includes(term));
-        }));
-    if (isFurnitureContext) {
-        const standardDetails = versions.get("STD") || versions.get("000");
-        const moistureResistantDetails = versions.get("MRH");
-        const furnitureVersions: ContextVersion[] = [
-            {
-                CodigoVersion: "STD",
-                Version: "MUEBLE ESTÁNDAR (STD)",
-                EjemploSAP: standardDetails?.sample || "Versión estándar para muebles y muebles de cocina",
-                CantidadSAP: standardDetails?.count || 0,
-                ContextKey: contextKey,
-            },
-            {
-                CodigoVersion: "MRH",
-                Version: "MUEBLE RESISTENTE A LA HUMEDAD (MRH)",
-                EjemploSAP: moistureResistantDetails?.sample || "Versión resistente a la humedad para muebles y muebles de cocina",
-                CantidadSAP: moistureResistantDetails?.count || 0,
-                ContextKey: contextKey,
-            },
-        ];
-        setCachedSearch(cacheKey, furnitureVersions);
-        return furnitureVersions;
-    }
-
     const data = [...versions.entries()]
         .map(([code, details]) => ({
             CodigoVersion: code,
@@ -152,7 +109,6 @@ export async function GET(request: Request) {
     const limit = Math.min(200, Math.max(1, parseInt(searchParams.get("limit") || "100", 10) || 100));
     const referenceBase = getReferenceBase(searchParams.get("sku") || "");
     const groupCode = Number.parseInt(searchParams.get("groupCode") || "", 10);
-    const contextName = searchParams.get("productName") || "";
 
     try {
         let contextKey = "";
@@ -173,7 +129,7 @@ export async function GET(request: Request) {
             }, { status: 400 });
         }
 
-        const contextualVersions = await loadVersionsFromExistingItems(contextKey, contextName, sapFilter);
+        const contextualVersions = await loadVersionsFromExistingItems(contextKey, sapFilter);
         const filteredVersions = search
             ? contextualVersions.filter(version =>
                 normalizeText(`${version.CodigoVersion} ${version.Version} ${version.EjemploSAP}`).includes(search)
