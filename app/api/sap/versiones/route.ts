@@ -26,6 +26,17 @@ const VERSION_LABELS: Record<string, string> = {
     V2I: "VERSIÓN 2 - PERFORACIÓN IZQUIERDA",
 };
 
+// En muebles y cocinas SAP reutiliza versiones a nivel de familia comercial
+// (por ejemplo VBAN05 o VCOC08), no solamente dentro de una referencia puntual.
+// Consultarlas por prefijo conserva frentes, tableros y demás variantes reales,
+// sin mezclar familias de mármol o fibra de vidrio.
+const FURNITURE_AND_KITCHEN_PREFIXES = new Set([
+    "VBAN05", "VBAN06", "VBAN12", "VBAN15", "VBAN16", "VBAN22",
+    "VBAN23", "VBAN24", "VBAN27", "VBAN30", "VBAN31", "VBAN32", "VBAN33",
+    "VCOC01", "VCOC02", "VCOC03", "VCOC08", "VCOC09", "VCLO01",
+    "VROP03", "VROP07", "VROP10", "VROP11", "VROP12", "VOUT03",
+]);
+
 const normalizeText = (value: unknown) =>
     String(value ?? "")
         .toUpperCase()
@@ -116,8 +127,14 @@ export async function GET(request: Request) {
 
         if (referenceBase) {
             const escapedBase = referenceBase.replace(/'/g, "''");
-            contextKey = `SKU:${referenceBase}`;
-            sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'${escapedBase}-')`;
+            const skuPrefix = referenceBase.split("-")[0];
+            if (FURNITURE_AND_KITCHEN_PREFIXES.has(skuPrefix)) {
+                contextKey = `SKU-FAMILY:${skuPrefix}`;
+                sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'${skuPrefix}-')`;
+            } else {
+                contextKey = `SKU:${referenceBase}`;
+                sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'${escapedBase}-')`;
+            }
         } else if (Number.isFinite(groupCode)) {
             contextKey = `GROUP:${groupCode}`;
             sapFilter = `SalesItem eq 'tYES' and startswith(ItemCode,'V') and ItemsGroupCode eq ${groupCode}`;

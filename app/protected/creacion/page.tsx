@@ -306,6 +306,9 @@ const getVersionContextKey = (action: string | null, item: any) => {
 
     const sku = normalizeCatalogText(item?.SKU ?? item?.ItemCode);
     const segments = sku.split("-").filter(Boolean);
+    if (segments.length >= 1 && FURNITURE_PRODUCT_SKU_PREFIXES.includes(segments[0])) {
+        return `SKU-FAMILY:${segments[0]}`;
+    }
     return segments.length >= 2 ? `SKU:${segments.slice(0, 2).join("-")}` : "";
 };
 
